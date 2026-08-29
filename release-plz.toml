@@ -1,0 +1,18 @@
+[workspace]
+pr_draft = false
+pr_labels = ["release"]
+git_release_name = "{{ package }}-v{{ version }}"
+publish = true
+release_always = true
+git_tag_enable = true
+changelog_update = true
+
+[[package]]
+name = "waterui-browser-cef"
+git_release_name = "cef-v{{ version }}"
+git_tag_name = "cef-v{{ version }}"
+
+[[package]]
+name = "waterui-browser-wpe"
+git_release_name = "wpe-v{{ version }}"
+git_tag_name = "wpe-v{{ version }}"
