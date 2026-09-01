@@ -49,18 +49,20 @@
 //! One process therefore hosts one CEF runtime and every check runs against it,
 //! each on a web view of its own.
 //!
-//! Only the first two constraints are macOS ones. Linux and Windows have no
-//! application object to install and no bundle to run from: Chromium
-//! re-executes this same binary for every child process, and
-//! [`CefRuntimePaths::packaged`] resolves the runtime beside that binary rather
-//! than inside a bundle. The bundle staging and the `NSApplication` subclass are
-//! therefore compiled on macOS alone, and everything else — the checks, the page
-//! server, the subprocess dispatch — is the same code on all three platforms.
-//! Off macOS the staged runtime has to be beside the test executable; when it is
-//! not, `CefRuntimePaths::validate` says so and the run fails there rather than
-//! reporting a check nobody ran.
+//! Only the first constraint is a macOS one. No other platform has an
+//! application object to install, so the `NSApplication` subclass is compiled
+//! on macOS alone; everything else — the checks, the page server, the
+//! subprocess dispatch — is the same code everywhere.
+//!
+//! The second constraint has a Linux counterpart rather than an exception.
+//! [`CefRuntimePaths::packaged`] resolves the runtime from the directory the
+//! executable was run from, so a `target/debug/deps` binary has no runtime
+//! beside it and `cef_initialize` never gets as far as trapping. [`staging`]
+//! answers both with the layout `water package` produces for the platform — an
+//! application bundle on macOS, a flat runtime directory on Linux — and the
+//! checks re-run from inside it.
 
-mod bundle;
+mod staging;
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -176,7 +178,7 @@ impl Engine {
         // user's cache directory is not a test that cleans up after itself.
         let runtime = CefRuntime::initialize(CefRuntimeConfiguration::new(
             CefRuntimePaths::packaged(),
-            bundle::workspace().join("cache"),
+            staging::workspace().join("cache"),
         ));
 
         Self {
@@ -649,7 +651,7 @@ fn main() {
     // this binary — through the helper bundles staged around it on macOS, and
     // directly everywhere else — so a `--type=` argument means this process is
     // one of them and never returns from here.
-    if bundle::is_child_process() {
+    if staging::is_child_process() {
         std::process::exit(run_packaged_subprocess());
     }
 
@@ -660,17 +662,18 @@ fn main() {
         )
         .init();
 
-    // CEF traps rather than returning an error when its browser process is not
-    // bundled, so on macOS the checks run from a staged bundle around this
-    // executable. No other platform has a bundle to run from.
-    #[cfg(target_os = "macos")]
-    if !bundle::running_bundled() {
-        let bundled = bundle::stage();
-        tracing::info!(executable = %bundled.display(), "re-running from the staged bundle");
-        let status = std::process::Command::new(&bundled)
+    // CEF cannot start from the executable cargo built: macOS traps outside an
+    // application bundle, and Linux resolves its runtime library beside the
+    // executable, where cargo staged nothing. Both re-run the checks from the
+    // staged layout.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if !staging::running_staged() {
+        let staged = staging::stage();
+        tracing::info!(executable = %staged.display(), "re-running from the staged runtime");
+        let status = std::process::Command::new(&staged)
             .status()
-            .unwrap_or_else(|error| panic!("run {}: {error}", bundled.display()));
-        assert!(status.success(), "the bundled real-engine run {status}");
+            .unwrap_or_else(|error| panic!("run {}: {error}", staged.display()));
+        assert!(status.success(), "the staged real-engine run {status}");
         return;
     }
 
