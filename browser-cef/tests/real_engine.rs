@@ -48,12 +48,17 @@
 //!
 //! One process therefore hosts one CEF runtime and every check runs against it,
 //! each on a web view of its own.
-
-#[cfg(not(target_os = "macos"))]
-compile_error!(
-    "the CEF real-engine tests drive a macOS application bundle, which is what CEF requires of a \
-     browser process on this platform; run them on a macOS host"
-);
+//!
+//! Only the first two constraints are macOS ones. Linux and Windows have no
+//! application object to install and no bundle to run from: Chromium
+//! re-executes this same binary for every child process, and
+//! [`CefRuntimePaths::packaged`] resolves the runtime beside that binary rather
+//! than inside a bundle. The bundle staging and the `NSApplication` subclass are
+//! therefore compiled on macOS alone, and everything else — the checks, the page
+//! server, the subprocess dispatch — is the same code on all three platforms.
+//! Off macOS the staged runtime has to be beside the test executable; when it is
+//! not, `CefRuntimePaths::validate` says so and the run fails there rather than
+//! reporting a check nobody ran.
 
 mod bundle;
 
@@ -70,9 +75,10 @@ use executor_core::LocalExecutor;
 use executor_core::async_executor::AsyncLocalExecutor;
 use serde_json::Value;
 use tiny_http::{Header, Response, Server};
+#[cfg(target_os = "macos")]
+use waterui_browser_cef::initialize_macos_application;
 use waterui_browser_cef::{
-    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, initialize_macos_application, install,
-    run_packaged_subprocess,
+    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, install, run_packaged_subprocess,
 };
 use waterui_core::{Environment, View as _, view::Hook};
 use waterui_url::Url;
@@ -95,12 +101,12 @@ const UNREPRESENTABLE: u64 = 9_007_199_254_740_993;
 /// number rather than being tagged along with the one above.
 const REPRESENTABLE: u64 = 42;
 
-// The pages live with the shared webview crate because they exercise the shared
-// bridge contract; every real-engine suite loads the same ones.
-const FIRST_HTML: &str = include_str!("../../webview/tests/pages/first.html");
-const SECOND_HTML: &str = include_str!("../../webview/tests/pages/second.html");
-const CHECKS_JS: &str = include_str!("../../webview/tests/pages/checks.js");
-const STATE_SEED_JS: &str = include_str!("../../webview/tests/pages/state_seed.js");
+// The pages live at the workspace root because they exercise the shared bridge
+// contract; every real-engine suite in this repository loads the same ones.
+const FIRST_HTML: &str = include_str!("../../tests/pages/first.html");
+const SECOND_HTML: &str = include_str!("../../tests/pages/second.html");
+const CHECKS_JS: &str = include_str!("../../tests/pages/checks.js");
+const STATE_SEED_JS: &str = include_str!("../../tests/pages/state_seed.js");
 
 /// The local executor the page's handler replies are spawned onto.
 ///
@@ -159,6 +165,10 @@ impl Engine {
         let executor = TestExecutor(Rc::new(AsyncLocalExecutor::new()));
         executor_core::init_local_executor(executor.clone());
 
+        // The macOS browser process has to be a `CefAppProtocol` `NSApplication`
+        // subclass before anything asks for `sharedApplication`. Linux and
+        // Windows have no process-wide application object to install.
+        #[cfg(target_os = "macos")]
         initialize_macos_application();
         // `packaged` is the production resolution: the runtime staged beside the
         // executable inside the bundle. The cache is the one thing pointed
@@ -635,9 +645,10 @@ const CHECKS: [Check; 5] = [
 ];
 
 fn main() {
-    // Chromium launches its GPU, network and renderer processes from the helper
-    // bundles staged around this same executable, so a `--type=` argument means
-    // this process is one of them and never returns from here.
+    // Chromium launches its GPU, network and renderer processes by re-executing
+    // this binary — through the helper bundles staged around it on macOS, and
+    // directly everywhere else — so a `--type=` argument means this process is
+    // one of them and never returns from here.
     if bundle::is_child_process() {
         std::process::exit(run_packaged_subprocess());
     }
@@ -650,7 +661,9 @@ fn main() {
         .init();
 
     // CEF traps rather than returning an error when its browser process is not
-    // bundled, so the checks run from a staged bundle around this executable.
+    // bundled, so on macOS the checks run from a staged bundle around this
+    // executable. No other platform has a bundle to run from.
+    #[cfg(target_os = "macos")]
     if !bundle::running_bundled() {
         let bundled = bundle::stage();
         tracing::info!(executable = %bundled.display(), "re-running from the staged bundle");
