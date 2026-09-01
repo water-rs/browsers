@@ -37,7 +37,19 @@ jobs:
         if: runner.os == 'Windows'
         uses: tracel-ai/github-actions/install-dxc@295f2fdbae5271f4f8ad56d634e4ff6a95daafc8
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets --all-features
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - name: Test the default features
+        run: cargo test --workspace --all-targets
+      - name: Test the CEF runtime surfaces
+        run: cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      - name: Test the WPE surfaces
+        run: cargo test -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
+      - name: Compile the CEF backend without its binary distribution
+        run: cargo check -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview
 
   lint:
     name: Lint
@@ -53,7 +65,19 @@ jobs:
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - name: Clippy the default features
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy the CEF runtime surfaces
+        run: cargo clippy -p waterui-browser-cef --all-targets --features chromium,real-engine -- -D warnings
+      - name: Clippy the WPE surfaces
+        run: cargo clippy -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke -- -D warnings
+      - name: Clippy the CEF backend without its binary distribution
+        run: cargo clippy -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview -- -D warnings
 
   msrv:
     name: MSRV
@@ -66,4 +90,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - name: Check the default features
+        run: cargo check --workspace
+      - name: Check the CEF runtime surfaces
+        run: cargo check -p waterui-browser-cef --features chromium,real-engine
+      - name: Check the WPE surfaces
+        run: cargo check -p waterui-browser-wpe --features real-engine,runtime-smoke
+      - name: Check the CEF backend without its binary distribution
+        run: cargo check -p waterui-browser-cef --no-default-features --features compile-only,chromium,webview
