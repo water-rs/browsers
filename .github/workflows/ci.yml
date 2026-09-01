@@ -57,6 +57,16 @@ jobs:
       # none. `xvfb-run` supplies one for the process it launches, which is the
       # whole cargo invocation so the staged runtime's child processes inherit
       # it.
+      #
+      # A hosted runner has no GPU either, and the real-engine checks need one:
+      # a CEF browser here is windowless and exports its frames as a shared
+      # texture, which on Linux is a DMA-BUF out of Chromium's GPU process, and
+      # llvmpipe has no GPU allocation to export. The checks probe for an
+      # adapter before initializing CEF and skip with a reason on this runner
+      # (water-rs/browsers#12), so what this step proves on Linux is that the
+      # crate builds, its unit tests pass, and the runtime stages and re-runs
+      # the checks from itself. Do not drop the step for that: the day the leg
+      # moves to a machine with a GPU, the same command runs every check.
       - name: Test the CEF runtime surfaces
         if: runner.os == 'Linux'
         run: xvfb-run -a cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
