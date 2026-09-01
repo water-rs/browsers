@@ -18,7 +18,7 @@
 //! absence is a loud failure, never a skip:
 //!
 //! ```sh
-//! components/platform/browser-wpe/runtime/build-runtime.sh wpe-artifacts
+//! browser-wpe/runtime/build-runtime.sh wpe-artifacts
 //! unzip -q wpe-artifacts/waterui-wpe-*.zip -d wpe-runtime
 //! WATERUI_WPE_RUNTIME="$PWD/wpe-runtime" \
 //!     cargo nextest run -p waterui-browser-wpe --features real-engine
@@ -68,12 +68,12 @@ const UNREPRESENTABLE: u64 = 9_007_199_254_740_993;
 /// number rather than being tagged along with the one above.
 const REPRESENTABLE: u64 = 42;
 
-// The pages live with the shared webview crate because they exercise the shared
-// bridge contract; every real-engine suite loads the same ones.
-const FIRST_HTML: &str = include_str!("../../webview/tests/pages/first.html");
-const SECOND_HTML: &str = include_str!("../../webview/tests/pages/second.html");
-const CHECKS_JS: &str = include_str!("../../webview/tests/pages/checks.js");
-const STATE_SEED_JS: &str = include_str!("../../webview/tests/pages/state_seed.js");
+// The pages live at the workspace root because they exercise the shared bridge
+// contract; every real-engine suite in this repository loads the same ones.
+const FIRST_HTML: &str = include_str!("../../tests/pages/first.html");
+const SECOND_HTML: &str = include_str!("../../tests/pages/second.html");
+const CHECKS_JS: &str = include_str!("../../tests/pages/checks.js");
+const STATE_SEED_JS: &str = include_str!("../../tests/pages/state_seed.js");
 
 /// The local executor the page's handler replies are spawned onto.
 ///
@@ -133,7 +133,7 @@ fn runtime_paths() -> WpeRuntimePaths {
     let root = std::env::var_os(RUNTIME_ENV).unwrap_or_else(|| {
         panic!(
             "{RUNTIME_ENV} is not set. These tests drive a real WPE WebKit runtime rather than a \
-             stand-in: build one with components/platform/browser-wpe/runtime/build-runtime.sh and \
+             stand-in: build one with browser-wpe/runtime/build-runtime.sh and \
              point {RUNTIME_ENV} at the staged root holding lib/libwaterui_wpe.so, runtime.json \
              and licenses/."
         )
