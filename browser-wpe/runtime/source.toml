@@ -1,3 +1,7 @@
+# This describes how to build one WPE WebKit release. Which release that is
+# belongs to the crate — `package.metadata.waterui.wpe-runtime.version` in
+# `../Cargo.toml`, where a consumer of the published crate can read it — and
+# `build-runtime.sh` refuses to build anything when the two disagree.
 version = "2.52.5"
 source_url = "https://wpewebkit.org/releases/wpewebkit-2.52.5.tar.xz"
 source_sha256 = "bcfc6c91db7659dcf24f6ff79ad27ac1eae1bc61dca0dbfee154706926740b3b"
