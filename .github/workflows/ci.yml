@@ -31,7 +31,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1 xvfb
       # `shaderloom` compiles WGSL to DXIL on Windows through `dxc`
       - name: Install DirectX Shader Compiler
         if: runner.os == 'Windows'
@@ -44,7 +44,15 @@ jobs:
       # crates is therefore named by the pass that covers it.
       - name: Test the default features
         run: cargo test --workspace --all-targets
+      # Chromium needs a display server to start, and a hosted Linux runner has
+      # none. `xvfb-run` supplies one for the process it launches, which is the
+      # whole cargo invocation so the staged runtime's child processes inherit
+      # it.
       - name: Test the CEF runtime surfaces
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      - name: Test the CEF runtime surfaces
+        if: runner.os != 'Linux'
         run: cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
       - name: Test the WPE surfaces
         run: cargo test -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
