@@ -61,7 +61,23 @@
 //! answers both with the layout `water package` produces for the platform — an
 //! application bundle on macOS, a flat runtime directory on Linux — and the
 //! checks re-run from inside it.
+//!
+//! # What Linux needs that macOS does not
+//!
+//! A CEF browser here is windowless and hands its frames over as a shared
+//! texture, which on Linux is a DMA-BUF exported by Chromium's GPU process.
+//! That needs a GPU: a machine whose only adapter is Mesa's llvmpipe has no GPU
+//! allocation to export, and Chromium refuses to create the browser at all.
+//! Hosted CI runners are such machines, so on Linux [`gpu`] asks that question
+//! before CEF is initialized and these checks report a skip instead of failing
+//! on a null browser. macOS always has a GPU and always runs them.
+//!
+//! The skip is deliberately not a fallback: no software-rendering path exists
+//! in this backend, and the day a Linux machine with a GPU runs this, every
+//! check runs on it exactly as it does on macOS.
 
+#[cfg(target_os = "linux")]
+mod gpu;
 mod staging;
 
 use std::cell::RefCell;
@@ -674,6 +690,16 @@ fn main() {
             .status()
             .unwrap_or_else(|error| panic!("run {}: {error}", staged.display()));
         assert!(status.success(), "the staged real-engine run {status}");
+        return;
+    }
+
+    // Asked here, from the staged runtime, so that staging and the re-execution
+    // are still exercised on a machine that cannot run the checks themselves —
+    // and asked before `Engine::start`, because CEF refuses the shared-texture
+    // browser these checks need without a GPU and says nothing about why.
+    #[cfg(target_os = "linux")]
+    if let Some(reason) = gpu::unusable_reason() {
+        tracing::warn!("skipping the CEF real-engine checks: {reason}");
         return;
     }
 
