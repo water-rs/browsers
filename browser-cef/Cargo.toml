@@ -17,6 +17,10 @@ workspace = true
 
 [features]
 default = ["cef-runtime"]
+# `cef-runtime` and `compile-only` describe incompatible builds and `build.rs`
+# rejects them together. `cef-runtime` is a default feature, so the compile-only
+# build is `--no-default-features --features compile-only`, and `--all-features`
+# is never a valid selection for this crate.
 cef-runtime = ["cef/sandbox", "cef-dll-sys/sandbox"]
 compile-only = ["cef/dox", "cef-dll-sys/dox"]
 chromium = [

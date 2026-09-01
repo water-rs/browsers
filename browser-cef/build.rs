@@ -7,7 +7,22 @@ fn main() {
     println!("cargo::rerun-if-changed=native/windows_sandbox.cc");
     let cef_runtime_enabled = std::env::var_os("CARGO_FEATURE_CEF_RUNTIME").is_some();
     let compile_only_enabled = std::env::var_os("CARGO_FEATURE_COMPILE_ONLY").is_some();
-    if !cef_runtime_enabled || compile_only_enabled {
+    // The two features describe incompatible builds, and the earliest thing that
+    // can say so is this script: it runs before the crate is compiled, and it is
+    // the step whose behaviour they disagree about. Cargo fails the build on
+    // `cargo::error` without a panic's noise around the message.
+    if cef_runtime_enabled && compile_only_enabled {
+        println!(
+            "cargo::error=the `cef-runtime` and `compile-only` features are mutually exclusive: \
+             `compile-only` builds against CEF's documentation stubs and stages no binary \
+             distribution, while `cef-runtime` links and loads one. `cef-runtime` is a default \
+             feature, so select the compile-only build with `--no-default-features --features \
+             compile-only` rather than adding `compile-only` on top of the defaults, and never \
+             with `--all-features`."
+        );
+        return;
+    }
+    if !cef_runtime_enabled {
         return;
     }
 
