@@ -44,6 +44,15 @@ jobs:
       # crates is therefore named by the pass that covers it.
       - name: Test the default features
         run: cargo test --workspace --all-targets
+      # Chromium sandboxes its child processes with a user namespace when it can
+      # and falls back to the setuid helper when it cannot. Ubuntu 24.04 refuses
+      # unprivileged user namespaces by default, which forces the fallback onto
+      # a helper no CI job can make setuid root, and Chromium aborts rather than
+      # run unsandboxed. Lifting the restriction keeps the sandbox on, which is
+      # what `no_sandbox: 0` asks of every platform.
+      - name: Allow Chromium's namespace sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Chromium needs a display server to start, and a hosted Linux runner has
       # none. `xvfb-run` supplies one for the process it launches, which is the
       # whole cargo invocation so the staged runtime's child processes inherit
