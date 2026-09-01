@@ -7,8 +7,17 @@ if [[ $# -ne 1 ]]; then
     exit 2
 fi
 
-repo_root="$(git rev-parse --show-toplevel)"
-runtime_directory="$repo_root/components/platform/browser-wpe/runtime"
+# Everything this script reads is resolved from where the script itself is,
+# rather than from a layout named inside it: the runtime directory is the one it
+# lives in, and the crate is that directory's parent.
+runtime_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+crate_directory="$(cd "$runtime_directory/.." && pwd)"
+# The two WaterUI licences the packaged runtime ships are the repository's own,
+# so git is asked about this script's directory rather than about whichever one
+# the caller happened to be standing in.
+repo_root="$(git -C "$runtime_directory" rev-parse --show-toplevel)"
+crate="waterui-browser-wpe"
+manifest="$crate_directory/Cargo.toml"
 source_configuration="$runtime_directory/source.toml"
 output_directory="$(mkdir -p "$1" && cd "$1" && pwd)"
 
@@ -26,17 +35,26 @@ released="$(configuration_value released)"
 maximum_glibc="$(configuration_value maximum_glibc)"
 minimum_gcc="$(configuration_value minimum_gcc)"
 smoke_timeout_seconds="$(configuration_value smoke_timeout_seconds)"
-cli_wpe_version="$(
-    sed -n 's/^wpe_version = "\([^"]*\)"$/\1/p' "$repo_root/cli/src/browser_runtime.toml"
-)"
 
 if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_gcc" || -z "$smoke_timeout_seconds" ]]; then
     echo "invalid WPE runtime source configuration" >&2
     exit 1
 fi
 
-if [[ "$cli_wpe_version" != "$version" ]]; then
-    echo "WPE runtime source version $version does not match CLI version $cli_wpe_version" >&2
+# The pin every consumer reads is the crate's own metadata, so that the `water`
+# CLI can take it from the published crate instead of keeping a copy of its own.
+# It is read through `cargo metadata` because it lives in a TOML file, and a
+# regex over TOML answers wrongly the first time the file is reformatted. The
+# same answer carries the target directory the smoke example is built into,
+# which is cargo's to decide and not this script's to assume.
+crate_metadata="$(cargo metadata --format-version 1 --no-deps --manifest-path "$manifest")"
+# `cargo metadata` answers for the whole workspace, so the crate is picked out by
+# the same name its example is built from below.
+pinned_version="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(next(package for package in json.load(sys.stdin)["packages"] if package["name"] == sys.argv[1])["metadata"]["waterui"]["wpe-runtime"]["version"])' "$crate")"
+target_directory="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+
+if [[ "$pinned_version" != "$version" ]]; then
+    echo "WPE runtime source version $version does not match the $crate pin $pinned_version" >&2
     exit 1
 fi
 
@@ -169,7 +187,7 @@ cmake --install "$build_directory"
 bridge_build_directory="$work_directory/bridge-build"
 PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig" \
 cmake \
-    -S "$repo_root/components/platform/browser-wpe/native" \
+    -S "$crate_directory/native" \
     -B "$bridge_build_directory" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -191,10 +209,11 @@ python3 "$runtime_directory/package-runtime.py" \
     --version "$version"
 
 cargo build \
-    --package waterui-browser-wpe \
+    --manifest-path "$manifest" \
+    --package "$crate" \
     --example runtime_smoke \
     --features runtime-smoke
-smoke_binary="$repo_root/target/debug/examples/runtime_smoke"
+smoke_binary="$target_directory/debug/examples/runtime_smoke"
 archive="$output_directory/waterui-wpe-$version-linux-$architecture.zip"
 snapshot="$output_directory/wpe-smoke-$version-linux-$architecture.png"
 metrics="$output_directory/wpe-smoke-$version-linux-$architecture.json"

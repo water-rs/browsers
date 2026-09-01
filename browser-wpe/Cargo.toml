@@ -11,6 +11,15 @@ description = "Bundled WPE WebKit runtime for WaterUI on Linux"
 keywords = ["wpe", "webkit", "webview", "browser", "waterui"]
 categories = ["gui", "web-programming"]
 
+# The WPE WebKit release this crate's bundled runtime is built from, and the
+# only place that version is decided. `runtime/build-runtime.sh` reads it from
+# here and refuses to build a runtime whose source configuration disagrees with
+# it. Because it travels with the published crate, a consumer — the `water` CLI,
+# which resolves which runtime artifact to download — reads the pin belonging to
+# the exact crate version it depends on rather than keeping a copy of its own.
+[package.metadata.waterui.wpe-runtime]
+version = "2.52.5"
+
 [lints]
 workspace = true
 
