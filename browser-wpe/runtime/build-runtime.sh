@@ -154,10 +154,10 @@ sudo apt-get install -y --no-install-recommends \
     pax-utils \
     xdg-dbus-proxy
 
-# Two options default on, are hard requirements when they are, and have no
-# library to satisfy them on the host this artifact must be built on. Both are
-# named here so the packaged runtime contains the same thing everywhere it is
-# built, rather than whatever the build host's archive happened to carry.
+# Three options default on and cannot be satisfied on the host this artifact
+# must be built on. All three are named here so the packaged runtime contains
+# the same thing everywhere it is built, rather than whatever the build host's
+# archive happened to carry.
 #
 #   * `USE_LIBBACKTRACE`: no Debian or Ubuntu release packages libbacktrace, so
 #     configuring fails on every apt-based host. It only symbolizes WebKit's own
@@ -171,6 +171,22 @@ sudo apt-get install -y --no-install-recommends \
 #     out without it, which is how a missing optional package became a build
 #     failure. JPEG XL decoding is what the runtime gives up; `libavif-dev` is
 #     in 22.04, so AVIF is unaffected.
+#   * `ENABLE_WPE_PLATFORM_DRM`: the KMS platform scans WPE's output out to a
+#     physical display, and this runtime never does that. `native/waterui_wpe.c`
+#     builds its display on `wpe_display_headless_new()` and exports every frame
+#     as a DMA-BUF for `src/gpu.rs` to import into wgpu, so the only platform
+#     backend it needs is `ENABLE_WPE_PLATFORM_HEADLESS`, which is a separate
+#     option and stays on. Turning the KMS platform off drops
+#     `Source/WebKit/WPEPlatform/wpe/drm` from the build, and with it the only
+#     unguarded uses of `drmModeCreateDumbBuffer` / `drmModeDestroyDumbBuffer`
+#     in the tree — libdrm 2.4.114 functions that 22.04's 2.4.113 does not
+#     declare. `Source/cmake/OptionsWPE.cmake` probes for exactly those two
+#     symbols, but `WPEScreenDRM.cpp` calls them without testing the result, so
+#     the KMS platform simply does not compile against 2.4.113. The other call
+#     site of a 2.4.114 symbol, `WebKitProtocolHandler.cpp`, is properly
+#     `HAVE()`-guarded and is unaffected. `USE_GBM` and `USE_LIBDRM` stay on —
+#     `ENABLE_GPU_PROCESS` requires them and the headless platform allocates its
+#     buffers through GBM — so the DMA-BUF path is untouched.
 cmake \
     -S "$source_directory" \
     -B "$build_directory" \
@@ -193,6 +209,7 @@ cmake \
     -DENABLE_MINIBROWSER=OFF \
     -DENABLE_WPE_LEGACY_API=OFF \
     -DENABLE_WPE_PLATFORM=ON \
+    -DENABLE_WPE_PLATFORM_DRM=OFF \
     -DUSE_JPEGXL=OFF \
     -DUSE_LIBBACKTRACE=OFF
 cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
