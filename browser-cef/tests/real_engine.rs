@@ -62,21 +62,22 @@
 //! for it — an application bundle on macOS, a flat runtime directory on Linux
 //! and Windows — and the checks re-run from inside it.
 //!
-//! # What Linux needs that macOS does not
+//! # What Linux and Windows need that macOS does not
 //!
 //! A CEF browser here is windowless and hands its frames over as a shared
-//! texture, which on Linux is a DMA-BUF exported by Chromium's GPU process.
-//! That needs a GPU: a machine whose only adapter is Mesa's llvmpipe has no GPU
+//! texture: a DMA-BUF exported by Chromium's GPU process on Linux, a Direct3D
+//! shared handle on Windows. That needs a GPU. A machine whose only adapter is
+//! a software rasterizer — Mesa's llvmpipe, Direct3D's WARP — has no GPU
 //! allocation to export, and Chromium refuses to create the browser at all.
-//! Hosted CI runners are such machines, so on Linux [`gpu`] asks that question
-//! before CEF is initialized and these checks report a skip instead of failing
-//! on a null browser. macOS always has a GPU and always runs them.
+//! Hosted CI runners are such machines, so on both platforms [`gpu`] asks that
+//! question before CEF is initialized and these checks report a skip instead of
+//! failing on a null browser. macOS always has a GPU and always runs them.
 //!
 //! The skip is deliberately not a fallback: no software-rendering path exists
-//! in this backend, and the day a Linux machine with a GPU runs this, every
-//! check runs on it exactly as it does on macOS.
+//! in this backend, and the day a Linux or Windows machine with a GPU runs
+//! this, every check runs on it exactly as it does on macOS.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod gpu;
 mod staging;
 
@@ -696,7 +697,7 @@ fn main() {
     // are still exercised on a machine that cannot run the checks themselves —
     // and asked before `Engine::start`, because CEF refuses the shared-texture
     // browser these checks need without a GPU and says nothing about why.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     if let Some(reason) = gpu::unusable_reason() {
         tracing::warn!("skipping the CEF real-engine checks: {reason}");
         return;
