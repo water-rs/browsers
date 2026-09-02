@@ -3,11 +3,13 @@
 //! Loading the bridge means `dlopen` plus symbol lookup, so the `unsafe` here is
 //! unavoidable: the library must actually export the symbols at the signatures
 //! declared in `abi`, which is the contract between this crate and the bridge it
-//! is built against. `libloading` keeps the module mapped for as long as the
-//! `Library` lives, and the `Arc` holding it outlives every resolved pointer.
+//! is built against. The module stays mapped for the life of the process — see
+//! [`RuntimeApi`] — so every resolved pointer stays valid for as long as anything
+//! can call it.
 
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_uint};
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
@@ -137,7 +139,23 @@ impl WpeRuntimePaths {
 
 pub struct RuntimeApi {
     pub api: WpeApi,
-    _library: libloading::Library,
+    /// The bridge, mapped for the life of the process.
+    ///
+    /// It is deliberately never closed. `dlclose` on this module is unsound
+    /// twice over: the bridge registers `GObject` types — `WaterView`,
+    /// `WaterToplevel`, `WaterDisplay` — and `GLib`'s type system keeps the
+    /// class and instance initializers it was handed forever, so unmapping the
+    /// code they live in leaves the type system pointing into nothing; and WPE
+    /// `WebKit` runs worker threads that no teardown call joins — `GStreamer`'s,
+    /// WTF's, the vblank monitor — so unloading the engine out from under them
+    /// stops whichever one was running. The smoke reported the second of those
+    /// as a SIGSEGV at an unmapped address on a thread that was still running
+    /// while the main thread dropped this handle.
+    ///
+    /// Dropping a `WpeRuntime` is still fine: the engine's threads keep running
+    /// against code that is still mapped, and the process reclaims all of it on
+    /// exit.
+    _library: ManuallyDrop<libloading::Library>,
 }
 
 impl RuntimeApi {
@@ -164,14 +182,14 @@ impl RuntimeApi {
         );
         Arc::new(Self {
             api,
-            _library: library,
+            _library: ManuallyDrop::new(library),
         })
     }
 }
 
 // SAFETY: the bridge ABI explicitly permits calling the frame-completion
-// functions from wgpu's completion thread, and libloading keeps the module mapped
-// until the final `Arc` drops, so the function pointers stay valid.
+// functions from wgpu's completion thread, and the module stays mapped for the
+// life of the process, so the function pointers stay valid.
 unsafe impl Send for RuntimeApi {}
 // SAFETY: see the `Send` impl — the API holds only function pointers into a module
 // that stays mapped, with no interior mutability.
