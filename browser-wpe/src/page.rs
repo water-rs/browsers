@@ -74,10 +74,17 @@ struct PageInner {
 }
 
 impl Drop for PageInner {
+    /// Frees the page, and says so on both sides of the call.
+    ///
+    /// The engine keeps threads of its own running through all of this, so the
+    /// order teardown happens in is load-bearing and worth being able to read
+    /// off a log.
     fn drop(&mut self) {
+        tracing::debug!("freeing the WPE page");
         // SAFETY: bridge ABI call on the page this type owns; see the module safety
         // note.
         unsafe { (self.runtime.api().api.page_free)(self.raw.as_ptr()) };
+        tracing::debug!("freed the WPE page");
     }
 }
 

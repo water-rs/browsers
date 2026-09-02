@@ -7,6 +7,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use base64::Engine as _;
+    use tracing_subscriber::EnvFilter;
     use waterui_browser_wpe::{
         BrowserFrame, BrowserFrameSource, BrowserGpuView, WPE_WEBKIT_VERSION, WpePage, WpeRuntime,
         WpeRuntimePaths,
@@ -45,8 +46,41 @@ mod linux {
         }
     }
 
+    /// Composites one frame offscreen and writes it out.
+    ///
+    /// The surface owns the view, which owns the frame's lease, and
+    /// `render_offscreen` consumes the surface — so the frame is handed back to
+    /// the engine before this returns.
+    fn snapshot(gpu_runtime: &GpuRuntime, frame: BrowserFrame, output_path: &std::ffi::OsStr) {
+        let source = SmokeFrameSource {
+            frame: RefCell::new(Some(frame)),
+        };
+        let surface = GpuSurface::new(BrowserGpuView::new(source));
+        let config = OffscreenRenderConfig::new(
+            OffscreenSize::try_from_pixels(WIDTH, HEIGHT)
+                .expect("WPE smoke viewport must be non-zero"),
+        )
+        .format(wgpu::TextureFormat::Rgba8Unorm);
+        let rendered = pollster::block_on(surface.render_offscreen(
+            gpu_runtime,
+            config,
+            &mut Environment::new(),
+        ))
+        .unwrap_or_else(|error| panic!("WPE smoke offscreen render failed: {error}"));
+        rendered
+            .save_png(output_path)
+            .unwrap_or_else(|error| panic!("WPE smoke snapshot write failed: {error}"));
+    }
+
     pub fn run() {
-        tracing_subscriber::fmt::init();
+        // The crate's own teardown events are `debug`, and this run is where
+        // the order they happen in is the thing being watched.
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("info,waterui_browser_wpe=debug")),
+            )
+            .init();
         let mut arguments = std::env::args_os().skip(1);
         let runtime_root = arguments
             .next()
@@ -75,7 +109,7 @@ mod linux {
         // The guard has to outlive the pump loop below: dropping it
         // unsubscribes, and the smoke run would then wait for a `Loaded` it can
         // no longer observe until it times out.
-        let _load_watcher = page.watch({
+        let load_watcher = page.watch({
             let loaded = Rc::clone(&loaded);
             let load_error = Rc::clone(&load_error);
             move |event| match event {
@@ -127,24 +161,25 @@ mod linux {
             std::thread::yield_now();
         }
 
-        let source = SmokeFrameSource {
-            frame: RefCell::new(Some(frame)),
-        };
-        let surface = GpuSurface::new(BrowserGpuView::new(source));
-        let config = OffscreenRenderConfig::new(
-            OffscreenSize::try_from_pixels(WIDTH, HEIGHT)
-                .expect("WPE smoke viewport must be non-zero"),
-        )
-        .format(wgpu::TextureFormat::Rgba8Unorm);
-        let rendered = pollster::block_on(surface.render_offscreen(
-            &gpu_runtime,
-            config,
-            &mut Environment::new(),
-        ))
-        .unwrap_or_else(|error| panic!("WPE smoke offscreen render failed: {error}"));
-        rendered
-            .save_png(output_path)
-            .unwrap_or_else(|error| panic!("WPE smoke snapshot write failed: {error}"));
+        snapshot(&gpu_runtime, frame, &output_path);
+
+        // Teardown, in the order the compiler would have dropped these anyway,
+        // said out loud. The engine's own threads keep running throughout, so
+        // when something dies here the log has to show how far the sequence had
+        // got.
+        // `render_offscreen` consumed the surface, and with it the view and the
+        // frame it had leased, so the compositing side is already down by here.
+        tracing::info!("snapshot written; tearing down");
+        drop(frame_ready);
+        drop(load_watcher);
+        drop(load_error);
+        drop(loaded);
+        tracing::info!("dropping the page, which owns the runtime");
+        drop(page);
+        drop(paths);
+        tracing::info!("dropping the GPU runtime");
+        drop(gpu_runtime);
+        tracing::info!("smoke teardown complete");
     }
 }
 

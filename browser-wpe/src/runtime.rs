@@ -205,10 +205,17 @@ struct RuntimeInner {
 }
 
 impl Drop for RuntimeInner {
+    /// Frees the runtime, and says so on both sides of the call.
+    ///
+    /// `water_wpe_runtime_free` drains the main context before it releases the
+    /// display, so the two events bracket every queued frame completion that
+    /// had not run yet.
     fn drop(&mut self) {
+        tracing::debug!("freeing the WPE runtime");
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.api.api.runtime_free)(self.raw.as_ptr()) };
+        tracing::debug!("freed the WPE runtime");
     }
 }
 
