@@ -166,11 +166,19 @@ sed -i '/git-svn/d' \
 sudo apt-get install -y --no-install-recommends libunwind-dev
 
 sudo "$source_directory/Tools/wpe/install-dependencies"
+# `gsettings-desktop-schemas` and `libglib2.0-bin` are for the packaged runtime
+# rather than for the build: the GIO modules the package stages read GSettings,
+# and a schema they cannot find is a `g_error` that kills the network process on
+# the first network load. The first package carries the schemas the proxy
+# resolver reads, the second carries `glib-compile-schemas`, and
+# `package-runtime.py` compiles them into the artifact.
 sudo apt-get install -y --no-install-recommends \
     bubblewrap \
     cmake \
+    gsettings-desktop-schemas \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
+    libglib2.0-bin \
     ninja-build \
     patchelf \
     pax-utils \

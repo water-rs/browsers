@@ -175,7 +175,42 @@ def copy_plugin_packages(
     for source in sorted(modules.glob("*.so")):
         sources.add(Dependency(source, source.resolve()))
         copied.append(copy_file(source, root / "lib/gio/modules" / source.name))
+    copied += copy_settings_schemas(root)
     return copied, sources
+
+
+def copy_settings_schemas(root: pathlib.Path) -> list[pathlib.Path]:
+    """Stages the GSettings schemas the GIO modules above read.
+
+    Those modules are not optional decoration: the network process loads them,
+    and the ones that consult GSettings — the proxy resolver above all — call
+    `g_settings_new`, which is a `g_error` and therefore fatal when no schema
+    source exists anywhere. A runtime that ships the modules and not their
+    schemas kills its own network process the first time a page is fetched over
+    the network, which is exactly what the real-engine tests saw:
+
+        GLib-GIO-ERROR **: No GSettings schemas are installed on the system
+
+    So the schemas travel with the modules. `XDG_DATA_DIRS` already names the
+    packaged `share` directory — `water_wpe_configure_runtime_paths` sets it —
+    so a compiled source there is the one the runtime finds, whatever the host
+    it is staged on has or has not installed.
+    """
+    staged = root / "share/glib-2.0/schemas"
+    installed = pathlib.Path("/usr/share/glib-2.0/schemas")
+    copied = [
+        copy_file(source, staged / source.name)
+        for pattern in ("*.gschema.xml", "*.gschema.override")
+        for source in sorted(installed.glob(pattern))
+    ]
+    if not copied:
+        raise RuntimeError(
+            f"no GSettings schemas to package: {installed} is empty, so the "
+            "runtime's GIO modules would abort the first time they read one"
+        )
+    run("glib-compile-schemas", str(staged))
+    copied.append(staged / "gschemas.compiled")
+    return copied
 
 
 def dependency_paths(path: pathlib.Path) -> list[Dependency]:
