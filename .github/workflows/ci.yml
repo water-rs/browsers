@@ -70,6 +70,13 @@ jobs:
       - name: Test the CEF runtime surfaces
         if: runner.os == 'Linux'
         run: xvfb-run -a cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      # macOS has a GPU and runs every check. Windows is the Linux case again:
+      # the shared texture is a Direct3D shared handle there, a hosted Windows
+      # runner offers only the WARP software adapter, and Chromium refuses the
+      # browser (water-rs/browsers#23). The same probe answers for both — a `Cpu`
+      # adapter, or one on a backend the import cannot be built on — so this step
+      # runs the checks on macOS and proves the build, the unit tests and the
+      # staged re-run on Windows.
       - name: Test the CEF runtime surfaces
         if: runner.os != 'Linux'
         run: cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
