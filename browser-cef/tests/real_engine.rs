@@ -54,13 +54,13 @@
 //! on macOS alone; everything else — the checks, the page server, the
 //! subprocess dispatch — is the same code everywhere.
 //!
-//! The second constraint has a Linux counterpart rather than an exception.
-//! [`CefRuntimePaths::packaged`] resolves the runtime from the directory the
-//! executable was run from, so a `target/debug/deps` binary has no runtime
-//! beside it and `cef_initialize` never gets as far as trapping. [`staging`]
-//! answers both with the layout `water package` produces for the platform — an
-//! application bundle on macOS, a flat runtime directory on Linux — and the
-//! checks re-run from inside it.
+//! The second constraint has a counterpart on Linux and Windows rather than an
+//! exception. [`CefRuntimePaths::packaged`] resolves the runtime from the
+//! directory the executable was run from, so a `target/debug/deps` binary has
+//! no runtime beside it and `cef_initialize` never gets as far as trapping.
+//! [`staging`] answers every platform with the layout `water package` produces
+//! for it — an application bundle on macOS, a flat runtime directory on Linux
+//! and Windows — and the checks re-run from inside it.
 //!
 //! # What Linux needs that macOS does not
 //!
@@ -679,10 +679,9 @@ fn main() {
         .init();
 
     // CEF cannot start from the executable cargo built: macOS traps outside an
-    // application bundle, and Linux resolves its runtime library beside the
-    // executable, where cargo staged nothing. Both re-run the checks from the
-    // staged layout.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    // application bundle, and Linux and Windows resolve the runtime library
+    // beside the executable, where cargo staged nothing. Every platform re-runs
+    // the checks from the staged layout.
     if !staging::running_staged() {
         let staged = staging::stage();
         tracing::info!(executable = %staged.display(), "re-running from the staged runtime");

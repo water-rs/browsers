@@ -1,9 +1,14 @@
-//! The flat runtime CEF resolves beside the executable on Linux.
+//! The flat runtime CEF resolves beside the executable on Linux and Windows.
 //!
 //! `CefRuntimePaths::packaged` takes the executable's own directory as the
-//! runtime root here, so a test running from `target/debug/deps` has no runtime
-//! at all: `libcef.so`, `icudtl.dat` and `locales/` live in the distribution
-//! `cef-dll-sys` downloaded, and nothing puts them next to the test binary.
+//! runtime root on both, so a test running from `target/debug/deps` has no
+//! runtime at all. The runtime library — `libcef.so` on Linux, `libcef.dll` on
+//! Windows — together with `icudtl.dat` and `locales/` lives in the
+//! distribution `cef-dll-sys` downloaded, and the copy `cef-dll-sys` makes of
+//! those files as it builds lands in the target directory, one level *above*
+//! the `deps` directory cargo runs a test binary from. Neither platform looks
+//! there.
+//!
 //! This module stages the same flat layout `water package` produces — every
 //! runtime file from the distribution, the runtime directories, and the
 //! manifest under `waterui-browser/cef` — around a hard link to this
@@ -15,11 +20,6 @@ use super::staged::{
     EXECUTABLE, clone_tree, create_directory, distribution, executable, hard_link, link,
     runtime_identity, write,
 };
-
-/// The runtime library `CefRuntimePaths::library` resolves beside the
-/// executable, and the one member of the distribution this staging cannot do
-/// without.
-const LIBRARY: &str = "libcef.so";
 
 /// Where the manifest `CefRuntimePaths::manifest` reads sits, relative to the
 /// executable.
@@ -33,6 +33,26 @@ const NON_RUNTIME_FILES: [&str; 3] = ["archive.json", "CMakeLists.txt", "CREDITS
 /// `cmake`, `libcef_dll` — are the sources for building against CEF and have no
 /// place beside a running executable.
 const RUNTIME_DIRECTORIES: [&str; 2] = ["locales", "swiftshader"];
+
+/// The runtime library `CefRuntimePaths::library` resolves beside the
+/// executable, and the one member of the distribution this staging cannot do
+/// without.
+///
+/// CEF names it `libcef` on both platforms and only the dynamic library suffix
+/// differs, which is exactly how `CefRuntimePaths::library` resolves it.
+fn library() -> String {
+    format!("libcef{}", std::env::consts::DLL_SUFFIX)
+}
+
+/// The staged executable's file name.
+///
+/// Windows runs a file by its extension, so the link has to carry the `.exe`
+/// the executable cargo built carries; Linux adds nothing. A macOS bundle
+/// names its executable from `CFBundleExecutable` instead, which is why the
+/// suffix belongs to this layout rather than to the shared name.
+fn executable_name() -> String {
+    format!("{EXECUTABLE}{}", std::env::consts::EXE_SUFFIX)
+}
 
 /// The staged runtime directory, which is also the directory the checks run
 /// from.
@@ -62,7 +82,7 @@ pub fn stage() -> PathBuf {
     }
     create_directory(&root);
 
-    let distribution = distribution(LIBRARY);
+    let distribution = distribution(&library());
     let entries = std::fs::read_dir(&distribution)
         .unwrap_or_else(|error| panic!("read {}: {error}", distribution.display()));
     for entry in entries {
@@ -91,7 +111,7 @@ pub fn stage() -> PathBuf {
     );
     write(&manifest, &runtime_identity());
 
-    let staged_executable = root.join(EXECUTABLE);
+    let staged_executable = root.join(executable_name());
     link(&staged_executable);
     staged_executable
 }
