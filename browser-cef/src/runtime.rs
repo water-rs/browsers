@@ -84,49 +84,25 @@ impl Drop for PlatformSandbox {
     }
 }
 
-#[cfg(target_os = "windows")]
-struct PlatformSandbox(std::ptr::NonNull<std::ffi::c_void>);
-
-#[cfg(target_os = "windows")]
-unsafe extern "C" {
-    fn waterui_cef_windows_sandbox_create() -> *mut std::ffi::c_void;
-    fn waterui_cef_windows_sandbox_info(sandbox: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    fn waterui_cef_windows_sandbox_destroy(sandbox: *mut std::ffi::c_void);
-}
-
-#[cfg(target_os = "windows")]
-impl PlatformSandbox {
-    fn initialize(_paths: &CefRuntimePaths, _args: &cef::MainArgs) -> Self {
-        // SAFETY: the shim allocates a `CefScopedSandboxInfo` with no
-        // preconditions; the returned pointer is owned by this value and
-        // checked for null right below.
-        let sandbox = unsafe { waterui_cef_windows_sandbox_create() };
-        Self(
-            std::ptr::NonNull::new(sandbox)
-                .expect("failed to allocate Windows CEF sandbox information"),
-        )
-    }
-
-    fn info(&self) -> *mut u8 {
-        // SAFETY: `self.0` came from `waterui_cef_windows_sandbox_create` and
-        // is destroyed only in `Drop`, so it is live for the whole borrow.
-        unsafe { waterui_cef_windows_sandbox_info(self.0.as_ptr()) }.cast()
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for PlatformSandbox {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from `waterui_cef_windows_sandbox_create`;
-        // `Drop` runs at most once, and nothing uses the pointer afterwards.
-        unsafe { waterui_cef_windows_sandbox_destroy(self.0.as_ptr()) };
-    }
-}
-
-#[cfg(target_os = "linux")]
+/// Neither Linux nor Windows passes a sandbox object through the CEF API.
+///
+/// Linux never had one to pass: Chromium's own namespace or setuid sandbox
+/// isolates the child processes and `sandbox_info` is null.
+///
+/// Windows no longer has one an executable can build. CEF 150 creates the
+/// sandbox inside its own `bootstrap.exe` / `bootstrapc.exe` and hands it to a
+/// client DLL through the `RunWinMain` / `RunConsoleMain` that DLL exports; no
+/// windows64 distribution of this release ships the `cef_sandbox.lib` that used
+/// to implement `cef_sandbox_info_create`, and `libcef.dll` does not export it
+/// either. Every test binary here — and every `water`-built Windows application
+/// until it is packaged as such a client DLL — is an ordinary executable, so it
+/// has nothing to pass, and says so through `no_sandbox` in
+/// [`CefRuntime::initialize`] rather than passing null while claiming to be
+/// sandboxed. Restoring it is water-rs/browsers#17.
+#[cfg(not(target_os = "macos"))]
 struct PlatformSandbox;
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 impl PlatformSandbox {
     const fn initialize(_paths: &CefRuntimePaths, _args: &cef::MainArgs) -> Self {
         Self
@@ -445,9 +421,6 @@ struct CefBootstrap {
 fn bootstrap(paths: &CefRuntimePaths) -> Result<CefBootstrap, i32> {
     let args = Args::new();
     let sandbox = PlatformSandbox::initialize(paths, args.as_main_args());
-    #[cfg(target_os = "windows")]
-    let sandbox_info = sandbox.info();
-    #[cfg(not(target_os = "windows"))]
     let sandbox_info = PlatformSandbox::info();
     let library = LoadedCefLibrary::load(&paths.library());
     let hash = api_hash(sys::CEF_API_VERSION_LAST, 0);
@@ -523,9 +496,11 @@ impl core::fmt::Debug for CefRuntime {
 impl CefRuntime {
     /// Loads, validates, executes subprocess dispatch, and initializes CEF.
     ///
-    /// CEF's OS sandbox remains enabled. A missing helper or malformed runtime
-    /// therefore fails during CEF initialization instead of silently disabling
-    /// isolation.
+    /// CEF's OS sandbox remains enabled on macOS and Linux: a missing helper or
+    /// malformed runtime fails during CEF initialization instead of silently
+    /// disabling isolation. Windows runs without it, because CEF 150 offers no
+    /// sandbox to an executable; see [`PlatformSandbox`] and
+    /// water-rs/browsers#17.
     ///
     /// # Panics
     ///
@@ -558,9 +533,6 @@ impl CefRuntime {
         } = bootstrap(&paths).unwrap_or_else(|exit_code| {
             std::process::exit(exit_code);
         });
-        #[cfg(target_os = "windows")]
-        let sandbox_info = sandbox.info();
-        #[cfg(not(target_os = "windows"))]
         let sandbox_info = PlatformSandbox::info();
 
         let resources = paths.resources();
@@ -580,8 +552,18 @@ impl CefRuntime {
             .to_string_lossy()
             .as_ref()
             .into();
+        // Windows is the one platform with no sandbox object to give CEF: this
+        // release ships `cef_sandbox.lib` in no windows64 distribution and
+        // builds the sandbox inside `bootstrap.exe` for client DLLs instead, so
+        // an executable declares the configuration it is actually in rather
+        // than passing null underneath `no_sandbox: 0`. water-rs/browsers#17
+        // restores it by packaging the application as such a DLL.
+        #[cfg(target_os = "windows")]
+        let no_sandbox = 1;
+        #[cfg(not(target_os = "windows"))]
+        let no_sandbox = 0;
         let settings = Settings {
-            no_sandbox: 0,
+            no_sandbox,
             browser_subprocess_path,
             windowless_rendering_enabled: 1,
             external_message_pump: 1,
@@ -605,7 +587,7 @@ impl CefRuntime {
                 sandbox_info,
             ),
             1,
-            "CEF initialization failed with sandbox enabled and runtime {}",
+            "CEF initialization failed for runtime {}",
             paths.root().display()
         );
 
