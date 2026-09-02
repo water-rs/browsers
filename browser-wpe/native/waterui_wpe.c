@@ -120,10 +120,25 @@ static void water_wpe_frame_token_unref(WaterWpeFrameToken *token)
     g_free(token);
 }
 
+/* Whether the view a completion names still belongs to a page.
+ *
+ * A completion is queued onto the runtime's context and dispatched whenever the
+ * host next iterates it, which can be after the page has gone: the token holds
+ * the view alive, but `water_wpe_page_free` has already closed it and dropped
+ * the `WebKitWebView` whose side of the view listens for these signals. Telling
+ * a view nobody owns that its buffer came back reaches into that torn-down
+ * listener. The back pointer `water_wpe_page_free` clears is exactly the
+ * question being asked, so it is what answers it. */
+static gboolean water_wpe_frame_token_has_page(WaterWpeFrameToken *token)
+{
+    return ((WaterView *)token->view)->page != NULL;
+}
+
 static gboolean water_wpe_frame_presented_on_main(gpointer user_data)
 {
     WaterWpeFrameToken *token = user_data;
-    wpe_view_buffer_rendered(token->view, token->buffer);
+    if (water_wpe_frame_token_has_page(token))
+        wpe_view_buffer_rendered(token->view, token->buffer);
     water_wpe_frame_token_unref(token);
     return G_SOURCE_REMOVE;
 }
@@ -136,9 +151,16 @@ typedef struct {
 static gboolean water_wpe_frame_released_on_main(gpointer user_data)
 {
     WaterWpeRelease *release = user_data;
-    if (release->release_fence_fd >= 0)
-        wpe_buffer_set_release_fence(release->token->buffer, release->release_fence_fd);
-    wpe_view_buffer_released(release->token->view, release->token->buffer);
+    if (water_wpe_frame_token_has_page(release->token)) {
+        if (release->release_fence_fd >= 0)
+            wpe_buffer_set_release_fence(
+                release->token->buffer,
+                release->release_fence_fd);
+        wpe_view_buffer_released(release->token->view, release->token->buffer);
+    } else if (release->release_fence_fd >= 0) {
+        /* `wpe_buffer_set_release_fence` would have taken the descriptor. */
+        close(release->release_fence_fd);
+    }
     water_wpe_frame_token_unref(release->token);
     g_free(release);
     return G_SOURCE_REMOVE;
