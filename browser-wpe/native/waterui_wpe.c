@@ -88,7 +88,6 @@ typedef struct _WaterDisplay {
     WPEDisplay parent_instance;
     WPEDisplay *delegate;
     WaterWpeRuntime *runtime;
-    WPEBufferFormats *formats;
 } WaterDisplay;
 
 typedef struct _WaterDisplayClass {
@@ -387,10 +386,32 @@ static WPEDRMDevice *water_display_get_drm_device(WPEDisplay *display)
     return wpe_display_get_drm_device(water_display->delegate);
 }
 
+/* The formats are built here, for the caller, because the caller takes them:
+ * `wpe_display_get_preferred_buffer_formats` wraps whatever this returns in a
+ * `GRefPtr` with `adoptGRef` and keeps it for the rest of the display's life.
+ * Handing it a pointer this display also owned would leave one reference with
+ * two owners, and the second of them to let go would be unreferencing freed
+ * memory. WPE asks once and caches the answer. */
 static WPEBufferFormats *water_display_get_preferred_buffer_formats(
     WPEDisplay *display)
 {
-    return ((WaterDisplay *)display)->formats;
+    WPEDRMDevice *device =
+        wpe_display_get_drm_device(((WaterDisplay *)display)->delegate);
+    WPEBufferFormatsBuilder *builder = wpe_buffer_formats_builder_new(device);
+    wpe_buffer_formats_builder_append_group(
+        builder,
+        device,
+        WPE_BUFFER_FORMAT_USAGE_RENDERING);
+    wpe_buffer_formats_builder_append_format(
+        builder,
+        DRM_FORMAT_ARGB8888,
+        DRM_FORMAT_MOD_LINEAR);
+    wpe_buffer_formats_builder_append_format(
+        builder,
+        DRM_FORMAT_XRGB8888,
+        DRM_FORMAT_MOD_LINEAR);
+    /* `wpe_buffer_formats_builder_end` takes the builder and unreferences it. */
+    return wpe_buffer_formats_builder_end(builder);
 }
 
 static gboolean water_display_use_explicit_sync(WPEDisplay *display)
@@ -402,7 +423,6 @@ static gboolean water_display_use_explicit_sync(WPEDisplay *display)
 static void water_display_dispose(GObject *object)
 {
     WaterDisplay *display = (WaterDisplay *)object;
-    g_clear_object(&display->formats);
     g_clear_object(&display->delegate);
     G_OBJECT_CLASS(water_display_parent_class)->dispose(object);
 }
@@ -426,7 +446,6 @@ static void water_display_init(WaterDisplay *display)
 {
     display->delegate = NULL;
     display->runtime = NULL;
-    display->formats = NULL;
 }
 
 static char *water_wpe_runtime_root(void)
@@ -514,23 +533,6 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
         (WaterDisplay *)g_object_new(water_display_get_type(), NULL);
     display->runtime = runtime;
     display->delegate = g_object_ref(runtime->delegate);
-    WPEDRMDevice *device = wpe_display_get_drm_device(runtime->delegate);
-    WPEBufferFormatsBuilder *builder =
-        wpe_buffer_formats_builder_new(device);
-    wpe_buffer_formats_builder_append_group(
-        builder,
-        device,
-        WPE_BUFFER_FORMAT_USAGE_RENDERING);
-    wpe_buffer_formats_builder_append_format(
-        builder,
-        DRM_FORMAT_ARGB8888,
-        DRM_FORMAT_MOD_LINEAR);
-    wpe_buffer_formats_builder_append_format(
-        builder,
-        DRM_FORMAT_XRGB8888,
-        DRM_FORMAT_MOD_LINEAR);
-    display->formats = wpe_buffer_formats_builder_end(builder);
-    wpe_buffer_formats_builder_unref(builder);
     runtime->display = WPE_DISPLAY(display);
     return runtime;
 }
