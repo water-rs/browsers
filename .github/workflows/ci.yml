@@ -73,8 +73,19 @@ jobs:
       - name: Test the CEF runtime surfaces
         if: runner.os != 'Linux'
         run: cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      # `real-engine` is deliberately missing from this one step's feature list.
+      # `browser-wpe/tests/real_engine.rs` drives a genuine WPE WebKit runtime
+      # and fails loudly when none is staged, and a hosted runner cannot stage
+      # one: the `water` CLI downloads a prebuilt archive for the release pinned
+      # in `package.metadata.waterui.wpe-runtime`, and no such artifact is
+      # published anywhere yet, while `runtime/build-runtime.sh` compiles WebKit
+      # from source for hours. Those checks therefore run in
+      # `wpe-real-engine.yml`, which builds the runtime with that script, caches
+      # it, and stages the packaged archive exactly as `water package` would.
+      # Nothing stops being compiled here: the `Lint` job below builds the
+      # real-engine target with `-D warnings`, and the `MSRV` job checks it.
       - name: Test the WPE surfaces
-        run: cargo test -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
+        run: cargo test -p waterui-browser-wpe --all-targets --features runtime-smoke
       - name: Compile the CEF backend without its binary distribution
         run: cargo check -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview
 
