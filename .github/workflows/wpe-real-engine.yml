@@ -119,7 +119,7 @@ jobs:
         env:
           WATERUI_WPE_WORK_DIRECTORY: ${{ github.workspace }}/wpe-work
         run: |
-          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%p
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
           ulimit -c unlimited
           browser-wpe/runtime/build-runtime.sh runtime-artifacts
 
@@ -144,6 +144,21 @@ jobs:
           unzip -q "$archive" -d wpe-runtime
           echo "WATERUI_WPE_RUNTIME=$GITHUB_WORKSPACE/wpe-runtime" >> "$GITHUB_ENV"
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       # The invocation `ci.yml` cannot satisfy, run where the runtime exists.
+      #
+      # It runs under nextest because WPE WebKit is one runtime per process:
+      # `cargo test` starts every test in a thread of one process, and the
+      # second `WpeRuntime` in a process is refused by the bridge. nextest gives
+      # each test its own process, which is the shape these tests need rather
+      # than a way around the contract. The crash reporter wraps it because a
+      # test binary that dies on a signal takes its output down with it.
       - name: Test the WPE surfaces against the real engine
-        run: cargo test -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
+          ulimit -c unlimited
+          browser-wpe/runtime/run-with-crash-report.py cargo nextest run \
+            -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke

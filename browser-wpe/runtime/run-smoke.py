@@ -4,10 +4,11 @@ import argparse
 import json
 import os
 import pathlib
-import resource
 import shutil
 import subprocess
 import time
+
+import crash_report
 
 # Stopping at the GLib critical rather than at whatever it later corrupts is the
 # difference between a stack that names a defect and a bare `-11`: a critical
@@ -56,43 +57,7 @@ def smoke_environment() -> dict[str, str]:
     return environment
 
 
-def allow_core_dumps() -> None:
-    """Lets the smoke leave a core behind.
-
-    A crash that only happens at full speed cannot be caught by running the
-    thing again under a debugger — the debugger is the reason it stops
-    happening. A core is the same evidence taken without touching the timing.
-    """
-    _, hard = resource.getrlimit(resource.RLIMIT_CORE)
-    resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))
-
-
-def core_for(pid: int, executable: pathlib.Path) -> pathlib.Path | None:
-    """Where this kernel put the core for `pid`, if it put one anywhere.
-
-    The location is the kernel's to decide, so it is read from the kernel
-    rather than assumed: a pattern beginning with `|` hands the core to a
-    handler and leaves nothing on disk, and a pattern using specifiers beyond
-    `%p` and `%e` is one this does not claim to resolve.
-    """
-    pattern = pathlib.Path("/proc/sys/kernel/core_pattern").read_text().strip()
-    if pattern.startswith("|"):
-        print(f"cores go to a handler ({pattern}); none is on disk", flush=True)
-        return None
-    name = pattern.replace("%p", str(pid)).replace("%e", executable.name)
-    if "%" in name:
-        print(f"unsupported core pattern {pattern}", flush=True)
-        return None
-    core = pathlib.Path(name)
-    if not core.is_absolute():
-        core = pathlib.Path.cwd() / core
-    if not core.is_file():
-        print(f"no core at {core}", flush=True)
-        return None
-    return core
-
-
-def report_crash(command: list[str], environment: dict[str, str], pid: int) -> None:
+def report_crash(command: list[str], environment: dict[str, str], started: float) -> None:
     """Prints the stacks of the smoke that just died.
 
     The core is the first choice, because it is the crash that actually
@@ -101,34 +66,12 @@ def report_crash(command: list[str], environment: dict[str, str], pid: int) -> N
     weaker one — a race that only loses at full speed can win under a debugger,
     and then the rerun exits cleanly and says nothing.
     """
+    if crash_report.cores_since(started):
+        crash_report.report_since(started)
+        return
     debugger = shutil.which("gdb")
     if debugger is None:
         print("no gdb on PATH: the smoke crash has no stack to report", flush=True)
-        return
-    executable = pathlib.Path(command[0])
-    core = core_for(pid, executable)
-    if core is not None:
-        print(f"the smoke died on a signal; reading {core}", flush=True)
-        subprocess.run(
-            [
-                debugger,
-                "-batch",
-                "-nx",
-                "-ex",
-                "thread apply all bt",
-                # A frame in no library — `?? ()` at a bare address — is the
-                # signature of code that was unloaded, so the crash is only
-                # readable next to the list of what was still mapped and what
-                # the gaps between those mappings are.
-                "-ex",
-                "info sharedlibrary",
-                "-ex",
-                "info proc mappings",
-                str(executable),
-                str(core),
-            ],
-            check=False,
-        )
         return
     print(
         "the smoke died on a signal and left no core; running it again under gdb, "
@@ -164,6 +107,8 @@ def main() -> None:
 
     identity = json.loads((arguments.runtime / "runtime.json").read_text())
     started = time.monotonic_ns()
+    # `crash_report` finds cores by modification time, which is wall clock.
+    crashes_after = time.time()
     command = [
         str(arguments.binary),
         str(arguments.runtime),
@@ -171,7 +116,9 @@ def main() -> None:
         str(arguments.timeout_seconds),
     ]
     environment = smoke_environment()
-    process = subprocess.Popen(command, env=environment, preexec_fn=allow_core_dumps)
+    process = subprocess.Popen(
+        command, env=environment, preexec_fn=crash_report.allow_core_dumps
+    )
     peak_resident_bytes = 0
     peak_process_count = 0
     while process.poll() is None:
@@ -187,7 +134,7 @@ def main() -> None:
             pass
     if process.returncode != 0:
         if process.returncode < 0:
-            report_crash(command, environment, process.pid)
+            report_crash(command, environment, crashes_after)
         raise RuntimeError(
             f"WPE runtime smoke process exited with {process.returncode}"
         )
