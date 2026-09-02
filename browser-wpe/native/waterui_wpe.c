@@ -455,6 +455,54 @@ bool water_wpe_runtime_iteration(WaterWpeRuntime *runtime)
     return g_main_context_iteration(runtime->context, FALSE);
 }
 
+uint32_t water_wpe_runtime_readiness(
+    WaterWpeRuntime *runtime,
+    WaterWpeReadiness *readiness,
+    WaterWpePollFd *fds,
+    uint32_t capacity)
+{
+    g_assert(runtime != NULL);
+    g_assert(readiness != NULL);
+    g_assert(capacity == 0 || fds != NULL);
+    g_assert(capacity <= (uint32_t)G_MAXINT);
+
+    /* prepare() and query() have to run under ownership of the context, and the
+     * only thread that ever owns this one is the thread that made the runtime.
+     * Failing to acquire it means WPE is being driven from somewhere it was
+     * never handed to, which is not a state to paper over. */
+    if (!g_main_context_acquire(runtime->context)) {
+        g_error("WPE main context is owned by another thread");
+    }
+
+    gint max_priority = 0;
+    readiness->ready =
+        g_main_context_prepare(runtime->context, &max_priority) ? true : false;
+
+    /* g_main_context_query() writes nothing when the context has more
+     * descriptors than the buffer holds, and answers with the count it needed;
+     * the caller retries with that. */
+    GPollFD *queried = g_new0(GPollFD, capacity > 0 ? capacity : 1);
+    gint timeout_ms = -1;
+    gint n_fds = g_main_context_query(
+        runtime->context,
+        max_priority,
+        &timeout_ms,
+        queried,
+        (gint)capacity);
+    g_main_context_release(runtime->context);
+
+    readiness->timeout_ms = timeout_ms;
+    g_assert(n_fds >= 0);
+    if ((uint32_t)n_fds <= capacity) {
+        for (gint index = 0; index < n_fds; index++) {
+            fds[index].fd = queried[index].fd;
+            fds[index].events = (int16_t)queried[index].events;
+        }
+    }
+    g_free(queried);
+    return (uint32_t)n_fds;
+}
+
 void water_wpe_string_free(char *string)
 {
     g_free(string);

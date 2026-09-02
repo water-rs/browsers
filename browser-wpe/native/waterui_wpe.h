@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define WATER_WPE_ABI_VERSION 2
+#define WATER_WPE_ABI_VERSION 3
 #define WATER_WPE_MAX_PLANES 4
 
 typedef struct WaterWpeRuntime WaterWpeRuntime;
@@ -61,10 +61,47 @@ typedef void (*WaterWpeResultCallback)(
     const char *data,
     size_t len);
 
+/* One descriptor the runtime's main context wants watched, in `poll(2)` terms:
+ * `events` is a mask of `POLLIN` and friends, taken from GLib unchanged. */
+typedef struct {
+    int fd;
+    int16_t events;
+} WaterWpePollFd;
+
+/* When the runtime's main context next has work to do.
+ *
+ * `ready` means a source can be dispatched right now and the host must call
+ * `water_wpe_runtime_iteration` without waiting at all.
+ *
+ * `timeout_ms` is how long until the earliest timer source is due, or -1 when no
+ * source has a timeout and only a descriptor can wake the context. It says
+ * nothing about the descriptors: a host that does not watch them has to look
+ * again on a bound of its own, and a host that folds them into its own wakeup
+ * does not. */
+typedef struct {
+    bool ready;
+    int32_t timeout_ms;
+} WaterWpeReadiness;
+
 uint32_t water_wpe_abi_version(void);
 WaterWpeRuntime *water_wpe_runtime_new(char **error);
 void water_wpe_runtime_free(WaterWpeRuntime *runtime);
 bool water_wpe_runtime_iteration(WaterWpeRuntime *runtime);
+/* Reports what the runtime's main context is waiting for, so a host can schedule
+ * the next `water_wpe_runtime_iteration` instead of guessing at an interval.
+ *
+ * This is one `g_main_context_prepare` / `g_main_context_query` pass: it asks
+ * every source when it next wants to run and dispatches nothing. Writes the
+ * readiness through `readiness`, fills up to `capacity` entries of `fds`, and
+ * returns how many descriptors the context actually has — which may exceed
+ * `capacity`, in which case none were written and the caller retries with a
+ * buffer that size, exactly as `g_main_context_query` is used. `fds` may be NULL
+ * only when `capacity` is zero. */
+uint32_t water_wpe_runtime_readiness(
+    WaterWpeRuntime *runtime,
+    WaterWpeReadiness *readiness,
+    WaterWpePollFd *fds,
+    uint32_t capacity);
 void water_wpe_string_free(char *string);
 
 WaterWpePage *water_wpe_page_new(

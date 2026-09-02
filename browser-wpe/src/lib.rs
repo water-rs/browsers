@@ -35,6 +35,8 @@ mod install;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod page;
 #[cfg(all(feature = "webview", target_os = "linux"))]
+mod pump;
+#[cfg(all(feature = "webview", target_os = "linux"))]
 mod runtime;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod webview;
@@ -51,6 +53,8 @@ pub use input::{WpeInputGpuView, WpeSurfaceInput};
 pub use install::install;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use page::{PointerButton, WpePage};
+#[cfg(all(feature = "webview", target_os = "linux"))]
+pub use pump::{PumpDeadline, WpePollFd, WpeReadiness};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use runtime::{WPE_WEBKIT_VERSION, WpeRuntime, WpeRuntimePaths};
 #[cfg(all(feature = "webview", target_os = "linux"))]
