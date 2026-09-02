@@ -8,34 +8,45 @@ mod linux {
 
     use base64::Engine as _;
     use waterui_browser_wpe::{
-        DmaBufFrameSource, DmaBufGpuView, WPE_WEBKIT_VERSION, WpePage, WpeRuntime, WpeRuntimePaths,
+        BrowserFrame, BrowserFrameSource, BrowserGpuView, WPE_WEBKIT_VERSION, WpePage, WpeRuntime,
+        WpeRuntimePaths,
     };
     use waterui_core::Environment;
     use waterui_graphics::gpu_surface::{GpuSurface, OffscreenRenderConfig, OffscreenSize};
     use waterui_graphics::shared_context::GpuRuntime;
     use waterui_webview::{BackendEvent, WebViewEvent};
-    use wgpu_external_frame::dma_buf::DmaBufFrame;
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
 
     struct SmokeFrameSource {
-        frame: RefCell<Option<DmaBufFrame>>,
+        frame: RefCell<Option<BrowserFrame>>,
     }
 
-    impl DmaBufFrameSource for SmokeFrameSource {
+    impl BrowserFrameSource for SmokeFrameSource {
         fn pump(&self) {}
 
         fn resize(&self, _width: u32, _height: u32, _scale: f64) {}
 
         fn set_frame_waker(&self, _waker: Rc<dyn Fn()>) {}
 
-        fn take_frame(&self) -> Option<DmaBufFrame> {
+        fn take_frame(&self) -> Option<BrowserFrame> {
             self.frame.borrow_mut().take()
         }
     }
 
+    /// Which platform buffer WPE rendered into, for the run's own record: the
+    /// kind is the host's to decide, so a run that changes kind is a change in
+    /// what was actually exercised.
+    const fn frame_kind(frame: &BrowserFrame) -> &'static str {
+        match frame {
+            BrowserFrame::DmaBuf(_) => "dma-buf",
+            BrowserFrame::Shm(_) => "shared memory",
+        }
+    }
+
     pub fn run() {
+        tracing_subscriber::fmt::init();
         let mut arguments = std::env::args_os().skip(1);
         let runtime_root = arguments
             .next()
@@ -101,6 +112,12 @@ mod linux {
         let frame = page
             .take_frame()
             .expect("WPE signalled a frame without retaining it");
+        tracing::info!(
+            kind = frame_kind(&frame),
+            width = WIDTH,
+            height = HEIGHT,
+            "WPE submitted a frame"
+        );
         while !frame.is_render_ready() {
             page.pump();
             assert!(
@@ -113,7 +130,7 @@ mod linux {
         let source = SmokeFrameSource {
             frame: RefCell::new(Some(frame)),
         };
-        let surface = GpuSurface::new(DmaBufGpuView::new(source));
+        let surface = GpuSurface::new(BrowserGpuView::new(source));
         let config = OffscreenRenderConfig::new(
             OffscreenSize::try_from_pixels(WIDTH, HEIGHT)
                 .expect("WPE smoke viewport must be non-zero"),

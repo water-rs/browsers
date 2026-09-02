@@ -5,6 +5,7 @@ use wgpu_external_frame::dma_buf::{DmaBufFrame, DmaBufImporter};
 
 #[cfg(feature = "webview")]
 use crate::WpePage;
+use crate::frame::{BrowserFrame, ShmFrame};
 #[cfg(feature = "webview")]
 use crate::input::{WpeInputGpuView, WpeSurfaceInput};
 
@@ -25,8 +26,8 @@ struct GpuState {
     source: Option<SourceTexture>,
 }
 
-/// Source of Linux browser frames for GPU-only DMA-BUF composition.
-pub trait DmaBufFrameSource: 'static {
+/// Source of Linux browser frames for GPU composition.
+pub trait BrowserFrameSource: 'static {
     /// Drains engine work that is ready on the current thread.
     fn pump(&self);
     /// Updates the browser viewport.
@@ -34,11 +35,11 @@ pub trait DmaBufFrameSource: 'static {
     /// Installs the host redraw callback.
     fn set_frame_waker(&self, waker: Rc<dyn Fn()>);
     /// Takes the newest available frame.
-    fn take_frame(&self) -> Option<DmaBufFrame>;
+    fn take_frame(&self) -> Option<BrowserFrame>;
 }
 
 #[cfg(feature = "webview")]
-impl DmaBufFrameSource for WpePage {
+impl BrowserFrameSource for WpePage {
     fn pump(&self) {
         Self::pump(self);
     }
@@ -51,29 +52,33 @@ impl DmaBufFrameSource for WpePage {
         Self::set_frame_waker(self, move || waker());
     }
 
-    fn take_frame(&self) -> Option<DmaBufFrame> {
+    fn take_frame(&self) -> Option<BrowserFrame> {
         Self::take_frame(self)
     }
 }
 
-/// GPU view that composites a Linux browser DMA-BUF stream without CPU readback.
-pub struct DmaBufGpuView<S> {
+/// GPU view that composites a Linux browser frame stream without CPU readback.
+///
+/// Both buffer kinds land in the same source texture and are blitted by the same
+/// pipeline: a dma-buf is imported, a shared-memory mapping is uploaded. See
+/// [`BrowserFrame`].
+pub struct BrowserGpuView<S> {
     source: S,
     gpu: Option<GpuState>,
-    pending_frame: Option<DmaBufFrame>,
+    pending_frame: Option<BrowserFrame>,
 }
 
-/// WPE-specialized DMA-BUF GPU view.
+/// WPE-specialized GPU view.
 #[cfg(feature = "webview")]
-pub type WpeGpuView = DmaBufGpuView<WpePage>;
+pub type WpeGpuView = BrowserGpuView<WpePage>;
 
-impl<S> core::fmt::Debug for DmaBufGpuView<S> {
+impl<S> core::fmt::Debug for BrowserGpuView<S> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.debug_struct("WpeGpuView").finish_non_exhaustive()
     }
 }
 
-impl<S: DmaBufFrameSource> DmaBufGpuView<S> {
+impl<S: BrowserFrameSource> BrowserGpuView<S> {
     /// Creates a renderer for `source`.
     ///
     /// The device scale comes from the frame the host draws — see
@@ -103,15 +108,18 @@ impl<S: DmaBufFrameSource> DmaBufGpuView<S> {
 /// on this layer reach `WPEPlatform` through
 /// [`WpeSurfaceInput`](crate::WpeSurfaceInput). A backend whose input arrives
 /// somewhere else entirely — GTK delivers it to the `GtkGLArea`'s event
-/// controllers — builds a [`DmaBufGpuView`] and owns a `WpeSurfaceInput` beside
+/// controllers — builds a [`BrowserGpuView`] and owns a `WpeSurfaceInput` beside
 /// it instead.
 #[cfg(feature = "webview")]
 #[must_use]
 pub fn gpu_view_with_input(page: WpePage) -> impl GpuView {
-    WpeInputGpuView::new(DmaBufGpuView::new(page.clone()), WpeSurfaceInput::new(page))
+    WpeInputGpuView::new(
+        BrowserGpuView::new(page.clone()),
+        WpeSurfaceInput::new(page),
+    )
 }
 
-impl<S: DmaBufFrameSource> GpuView for DmaBufGpuView<S> {
+impl<S: BrowserFrameSource> GpuView for BrowserGpuView<S> {
     #[expect(
         clippy::future_not_send,
         reason = "browser GPU views and WaterUI environments are confined to the UI thread"
@@ -155,7 +163,7 @@ impl<S: DmaBufFrameSource> GpuView for DmaBufGpuView<S> {
     }
 }
 
-fn resize_browser_source<S: DmaBufFrameSource>(source: &S, frame: &GpuFrame<'_>) {
+fn resize_browser_source<S: BrowserFrameSource>(source: &S, frame: &GpuFrame<'_>) {
     let scale = frame.scale();
     let logical_width = (f64::from(frame.width) / scale)
         .round()
@@ -170,11 +178,18 @@ fn resize_browser_source<S: DmaBufFrameSource>(source: &S, frame: &GpuFrame<'_>)
     source.resize(logical_width, logical_height, scale);
 }
 
-fn render_browser_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &GpuFrame<'_>) {
+fn render_browser_frame(gpu: &mut GpuState, incoming: BrowserFrame, frame: &GpuFrame<'_>) {
     assert_eq!(
         frame.format, gpu.target_format,
         "WPE target format changed after setup"
     );
+    match incoming {
+        BrowserFrame::DmaBuf(dma_buf) => render_dma_buf_frame(gpu, dma_buf, frame),
+        BrowserFrame::Shm(shm) => render_shm_frame(gpu, shm, frame),
+    }
+}
+
+fn render_dma_buf_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &GpuFrame<'_>) {
     ensure_source_texture(
         gpu,
         frame.device,
@@ -182,7 +197,12 @@ fn render_browser_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &G
         incoming.height,
         incoming.format.texture_format(),
     );
-    let bind_group = create_source_bind_group(gpu, &incoming, frame.device, frame.queue);
+    let bind_group = create_source_bind_group(
+        gpu,
+        incoming.format.force_opaque(),
+        frame.device,
+        frame.queue,
+    );
     let source = gpu
         .source
         .as_ref()
@@ -199,9 +219,61 @@ fn render_browser_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &G
     });
 }
 
+/// Uploads a shared-memory frame into the same source texture the imported
+/// dma-bufs land in, so the blit below sees one texture contract either way.
+///
+/// The lease is returned as soon as the upload has been staged:
+/// [`wgpu::Queue::write_texture`] copies out of the mapping before it returns,
+/// which is the whole reason a shared-memory frame needs neither a fence nor the
+/// deferred release its dma-buf sibling takes.
+fn render_shm_frame(gpu: &mut GpuState, mut incoming: ShmFrame, frame: &GpuFrame<'_>) {
+    let format = incoming.format();
+    ensure_source_texture(
+        gpu,
+        frame.device,
+        incoming.width(),
+        incoming.height(),
+        format.texture_format(),
+    );
+    let bind_group =
+        create_source_bind_group(gpu, format.force_opaque(), frame.device, frame.queue);
+    let source = gpu
+        .source
+        .as_ref()
+        .expect("WPE source texture must exist before upload");
+    frame.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &source.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        incoming.pixels(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(incoming.stride()),
+            rows_per_image: Some(incoming.height()),
+        },
+        wgpu::Extent3d {
+            width: incoming.width(),
+            height: incoming.height(),
+            depth_or_array_layers: 1,
+        },
+    );
+    incoming.presented();
+    let mut encoder = frame
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("waterui_wpe_shm_encoder"),
+        });
+    encode_browser_blit(gpu, &bind_group, frame, &mut encoder);
+    frame.queue.submit([encoder.finish()]);
+    incoming.release();
+}
+
 fn create_source_bind_group(
     gpu: &GpuState,
-    incoming: &DmaBufFrame,
+    force_opaque: bool,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> wgpu::BindGroup {
@@ -209,7 +281,7 @@ fn create_source_bind_group(
         .source
         .as_ref()
         .expect("WPE source texture must exist after allocation");
-    let force_opaque = u32::from(incoming.format.force_opaque());
+    let force_opaque = u32::from(force_opaque);
     let mut options = [0u8; 16];
     options[..4].copy_from_slice(&force_opaque.to_ne_bytes());
     queue.write_buffer(&gpu.options, 0, &options);

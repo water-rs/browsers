@@ -21,10 +21,10 @@ use num_traits::ToPrimitive as _;
 use waterui_str::Str;
 use waterui_url::Url;
 use waterui_webview::{BackendEvent, WatcherSet, WebViewError, WebViewEvent, bridge};
-use wgpu_external_frame::dma_buf::DmaBufFrame;
 
 use crate::abi::{WaterWpeBytes, WaterWpeFrame, WaterWpePage};
-use crate::frame::frame_from_abi;
+use crate::frame::BrowserFrame;
+use crate::lease::frame_from_abi;
 use crate::runtime::{RuntimeApi, WpeRuntime, take_error};
 
 const EVENT_NAVIGATION_STARTED: u32 = 1;
@@ -41,7 +41,7 @@ struct PageState {
     api: std::sync::Arc<RuntimeApi>,
     watchers: WatcherSet<BackendEvent>,
     handlers: RefCell<HashMap<String, MessageHandler>>,
-    frame: RefCell<Option<DmaBufFrame>>,
+    frame: RefCell<Option<BrowserFrame>>,
     frame_waker: RefCell<Option<Rc<dyn Fn()>>>,
     size: Cell<(u32, u32, f64)>,
     /// Which documents may reach the bridge; checked on every message.
@@ -401,7 +401,7 @@ impl WpePage {
 
     /// Takes the newest frame. Superseded frames are returned to WPE immediately.
     #[must_use]
-    pub fn take_frame(&self) -> Option<DmaBufFrame> {
+    pub fn take_frame(&self) -> Option<BrowserFrame> {
         self.inner.state.frame.borrow_mut().take()
     }
 

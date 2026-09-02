@@ -60,6 +60,10 @@ typedef struct {
     GMainContext *context;
     WPEView *view;
     WPEBuffer *buffer;
+    /* Shared-memory frames only: the pixels the frame points at, referenced for
+     * exactly as long as the token is, so the pointer the consumer holds stays
+     * valid until it releases the frame. NULL for a DMA-BUF frame. */
+    GBytes *data;
     gint references;
 } WaterWpeFrameToken;
 
@@ -109,6 +113,7 @@ static void water_wpe_frame_token_unref(WaterWpeFrameToken *token)
 {
     if (!g_atomic_int_dec_and_test(&token->references))
         return;
+    g_clear_pointer(&token->data, g_bytes_unref);
     g_object_unref(token->buffer);
     g_object_unref(token->view);
     g_main_context_unref(token->context);
@@ -164,21 +169,26 @@ static void water_view_constructed(GObject *object)
         object);
 }
 
-static gboolean water_view_render_buffer(
+static WaterWpeFrameToken *water_view_frame_token_new(
+    WaterWpePage *page,
     WPEView *view,
     WPEBuffer *buffer,
-    const WPERectangle *damage_rects,
-    guint n_damage_rects,
-    GError **error)
+    GBytes *data)
 {
-    (void)damage_rects;
-    (void)n_damage_rects;
-    (void)error;
+    WaterWpeFrameToken *token = g_new0(WaterWpeFrameToken, 1);
+    token->context = g_main_context_ref(page->runtime->context);
+    token->view = g_object_ref(view);
+    token->buffer = g_object_ref(buffer);
+    token->data = data != NULL ? g_bytes_ref(data) : NULL;
+    token->references = 1;
+    return token;
+}
 
-    WaterWpePage *page = ((WaterView *)view)->page;
-    g_assert(page != NULL);
-    g_assert(WPE_IS_BUFFER_DMA_BUF(buffer));
-
+static void water_view_render_dma_buf(
+    WaterWpePage *page,
+    WPEView *view,
+    WPEBuffer *buffer)
+{
     WPEBufferDMABuf *dma_buf = WPE_BUFFER_DMA_BUF(buffer);
     guint32 n_planes = wpe_buffer_dma_buf_get_n_planes(dma_buf);
     g_assert_cmpuint(n_planes, >, 0);
@@ -187,14 +197,9 @@ static gboolean water_view_render_buffer(
     g_assert_true(
         wpe_buffer_dma_buf_get_modifier(dma_buf) == DRM_FORMAT_MOD_LINEAR);
 
-    WaterWpeFrameToken *token = g_new0(WaterWpeFrameToken, 1);
-    token->context = g_main_context_ref(page->runtime->context);
-    token->view = g_object_ref(view);
-    token->buffer = g_object_ref(buffer);
-    token->references = 1;
-
     WaterWpeFrame frame = {
-        .token = token,
+        .token = water_view_frame_token_new(page, view, buffer, NULL),
+        .kind = WATER_WPE_FRAME_DMA_BUF,
         .width = (uint32_t)wpe_buffer_get_width(buffer),
         .height = (uint32_t)wpe_buffer_get_height(buffer),
         .format = wpe_buffer_dma_buf_get_format(dma_buf),
@@ -211,6 +216,70 @@ static gboolean water_view_render_buffer(
         frame.strides[plane] = wpe_buffer_dma_buf_get_stride(dma_buf, plane);
     }
     page->frame_callback(page->user_data, &frame);
+}
+
+/* The other half of the platform's buffer contract: a display with no DRM
+ * render node renders into shared memory instead. There is no plane to export
+ * and no fence to wait on — the pixels are already written — so the frame
+ * carries the mapping itself, alive for as long as its token. */
+static void water_view_render_shm(
+    WaterWpePage *page,
+    WPEView *view,
+    WPEBuffer *buffer)
+{
+    WPEBufferSHM *shm = WPE_BUFFER_SHM(buffer);
+    GBytes *data = wpe_buffer_shm_get_data(shm);
+    if (data == NULL)
+        g_error("WPE shared-memory buffer carries no pixels");
+    gsize len = 0;
+    const guint8 *pixels = g_bytes_get_data(data, &len);
+    guint32 height = (uint32_t)wpe_buffer_get_height(buffer);
+    guint stride = wpe_buffer_shm_get_stride(shm);
+    if ((gsize)stride * height > len)
+        g_error(
+            "WPE shared-memory buffer holds %" G_GSIZE_FORMAT
+            " bytes for %u rows of %u",
+            len,
+            height,
+            stride);
+
+    WaterWpeFrame frame = {
+        .token = water_view_frame_token_new(page, view, buffer, data),
+        .data = pixels,
+        .len = len,
+        .kind = WATER_WPE_FRAME_SHM,
+        .width = (uint32_t)wpe_buffer_get_width(buffer),
+        .height = height,
+        .pixel_format = (uint32_t)wpe_buffer_shm_get_format(shm),
+        .stride = stride,
+        .fds = { -1, -1, -1, -1 },
+        .rendering_fence_fd = -1,
+    };
+    page->frame_callback(page->user_data, &frame);
+}
+
+static gboolean water_view_render_buffer(
+    WPEView *view,
+    WPEBuffer *buffer,
+    const WPERectangle *damage_rects,
+    guint n_damage_rects,
+    GError **error)
+{
+    (void)damage_rects;
+    (void)n_damage_rects;
+    (void)error;
+
+    WaterWpePage *page = ((WaterView *)view)->page;
+    g_assert(page != NULL);
+
+    if (WPE_IS_BUFFER_DMA_BUF(buffer))
+        water_view_render_dma_buf(page, view, buffer);
+    else if (WPE_IS_BUFFER_SHM(buffer))
+        water_view_render_shm(page, view, buffer);
+    else
+        g_error(
+            "unsupported WPE buffer type %s",
+            G_OBJECT_TYPE_NAME(buffer));
     return TRUE;
 }
 
