@@ -116,6 +116,14 @@ def report_crash(command: list[str], environment: dict[str, str], pid: int) -> N
                 "-nx",
                 "-ex",
                 "thread apply all bt",
+                # A frame in no library — `?? ()` at a bare address — is the
+                # signature of code that was unloaded, so the crash is only
+                # readable next to the list of what was still mapped and what
+                # the gaps between those mappings are.
+                "-ex",
+                "info sharedlibrary",
+                "-ex",
+                "info proc mappings",
                 str(executable),
                 str(core),
             ],

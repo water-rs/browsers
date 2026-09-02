@@ -3,6 +3,7 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use std::cell::{Cell, RefCell};
+    use std::mem::ManuallyDrop;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
@@ -177,8 +178,18 @@ mod linux {
         tracing::info!("dropping the page, which owns the runtime");
         drop(page);
         drop(paths);
-        tracing::info!("dropping the GPU runtime");
-        drop(gpu_runtime);
+        // The GPU runtime is deliberately not dropped, and this is the same
+        // contract the engine gets: some libraries must not be unloaded from a
+        // running process. Dropping it drops the wgpu `Instance`, and
+        // wgpu-hal's GLES and Vulkan backends hold `libloading` handles for
+        // `libEGL` and `libvulkan`; closing those unloads Mesa's software
+        // drivers — llvmpipe and the LLVM inside it, which is what a runner
+        // with no GPU renders through — and those register `atexit`
+        // destructors that have to still be mapped when the process exits.
+        // The core this smoke captured is precisely that: `exit()` calling
+        // into an address that no library owns any more.
+        tracing::info!("pinning the GPU runtime for the life of the process");
+        let _gpu_runtime = ManuallyDrop::new(gpu_runtime);
         tracing::info!("smoke teardown complete");
     }
 }
