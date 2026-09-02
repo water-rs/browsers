@@ -234,10 +234,18 @@ impl core::fmt::Debug for WpeRuntime {
 impl WpeRuntime {
     /// Loads and initializes the exact staged WPE runtime.
     ///
+    /// One runtime is live per process at a time. WPE `WebKit` is a process-wide
+    /// singleton — its web context, its `GLib` types and its display all belong to
+    /// one runtime on the thread that owns its main context — so a second one is
+    /// refused by the bridge rather than left to abort somewhere inside the
+    /// engine. Dropping a [`WpeRuntime`] releases the claim; work that needs two
+    /// belongs in two processes, which is why the real-engine tests run one test
+    /// per process.
+    ///
     /// # Panics
     ///
-    /// Panics when the runtime is missing, invalid, ABI-incompatible, or fails
-    /// to initialize.
+    /// Panics when the runtime is missing, invalid, ABI-incompatible, already
+    /// live in this process, or fails to initialize.
     #[must_use]
     pub fn initialize(paths: &WpeRuntimePaths) -> Self {
         let api = RuntimeApi::load(paths);

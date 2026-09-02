@@ -497,6 +497,18 @@ uint32_t water_wpe_abi_version(void)
     return WATER_WPE_ABI_VERSION;
 }
 
+/* Whether a runtime is live in this process.
+ *
+ * WPE WebKit is a process-wide singleton: the web context, the GLib types this
+ * file registers and the display all belong to one runtime, on the thread that
+ * owns its main context. A second live runtime is a programming error, and left
+ * to the engine it surfaces as an abort from somewhere deep inside it — five
+ * parallel test threads each starting one is exactly how that was found — so it
+ * is refused here, in the one place that can see it, with a message that says
+ * what happened. Freeing the runtime releases the claim, so a host may tear one
+ * down and start another. */
+static gint water_wpe_runtime_live = 0;
+
 WaterWpeRuntime *water_wpe_runtime_new(char **error)
 {
     g_assert(error != NULL);
@@ -514,6 +526,13 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
             WEBKIT_MICRO_VERSION);
         return NULL;
     }
+    if (!g_atomic_int_compare_and_exchange(&water_wpe_runtime_live, 0, 1)) {
+        *error = g_strdup(
+            "a WPE WebKit runtime is already live in this process, and the "
+            "engine allows one at a time: free the first runtime before "
+            "creating another, or run the second in its own process");
+        return NULL;
+    }
     water_wpe_configure_runtime_paths();
 
     WaterWpeRuntime *runtime = g_new0(WaterWpeRuntime, 1);
@@ -526,6 +545,7 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
         g_object_unref(runtime->delegate);
         g_main_context_unref(runtime->context);
         g_free(runtime);
+        g_atomic_int_set(&water_wpe_runtime_live, 0);
         return NULL;
     }
 
@@ -546,6 +566,7 @@ void water_wpe_runtime_free(WaterWpeRuntime *runtime)
     g_object_unref(runtime->delegate);
     g_main_context_unref(runtime->context);
     g_free(runtime);
+    g_atomic_int_set(&water_wpe_runtime_live, 0);
 }
 
 bool water_wpe_runtime_iteration(WaterWpeRuntime *runtime)
