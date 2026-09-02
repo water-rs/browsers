@@ -154,10 +154,23 @@ sudo apt-get install -y --no-install-recommends \
     pax-utils \
     xdg-dbus-proxy
 
-# `USE_LIBBACKTRACE` defaults on and is a hard requirement when it is, but no
-# Debian or Ubuntu release packages libbacktrace, so configuring fails on every
-# apt-based host. It only symbolizes WebKit's own crash logs, which a shipped
-# runtime does not print.
+# Two options default on, are hard requirements when they are, and have no
+# library to satisfy them on the host this artifact must be built on. Both are
+# named here so the packaged runtime contains the same thing everywhere it is
+# built, rather than whatever the build host's archive happened to carry.
+#
+#   * `USE_LIBBACKTRACE`: no Debian or Ubuntu release packages libbacktrace, so
+#     configuring fails on every apt-based host. It only symbolizes WebKit's own
+#     crash logs, which a shipped runtime does not print.
+#   * `USE_JPEGXL`: `libjxl-dev` does not exist in Ubuntu 22.04, and 22.04 is
+#     not a choice — `source.toml` pins the artifact's glibc floor at 2.35 and
+#     this script refuses to package against a newer one, so every runtime a
+#     user downloads is built where libjxl cannot be installed. Upstream treats
+#     the package as optional in `Tools/glib/dependencies/apt`
+#     (`$(aptIfExists libjxl-dev)`) while `Source/cmake/OptionsWPE.cmake` errors
+#     out without it, which is how a missing optional package became a build
+#     failure. JPEG XL decoding is what the runtime gives up; `libavif-dev` is
+#     in 22.04, so AVIF is unaffected.
 cmake \
     -S "$source_directory" \
     -B "$build_directory" \
@@ -180,6 +193,7 @@ cmake \
     -DENABLE_MINIBROWSER=OFF \
     -DENABLE_WPE_LEGACY_API=OFF \
     -DENABLE_WPE_PLATFORM=ON \
+    -DUSE_JPEGXL=OFF \
     -DUSE_LIBBACKTRACE=OFF
 cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
 cmake --install "$build_directory"
