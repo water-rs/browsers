@@ -62,7 +62,9 @@ jobs:
       # `xdg-dbus-proxy` are the host tools the packaged runtime launches its
       # web processes through — `WpeRuntimePaths::validate` insists on both, and
       # `build-runtime.sh` installs them itself, so this step is what a cache
-      # hit needs. GCC 12 is for the WebKit build.
+      # hit needs. GCC 12 is for the WebKit build, and `gdb` is what
+      # `run-smoke.py` reaches for when the smoke dies on a signal: without it
+      # a crash reports a bare status and no stack.
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -70,7 +72,7 @@ jobs:
             libfontconfig1-dev libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev \
             libgdk-pixbuf-2.0-dev libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev \
             libwayland-dev libxkbcommon-dev mesa-vulkan-drivers libvulkan1 \
-            bubblewrap unzip xdg-dbus-proxy gcc-12 g++-12
+            bubblewrap unzip xdg-dbus-proxy gcc-12 g++-12 gdb
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wpe-real-engine
