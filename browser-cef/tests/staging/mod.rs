@@ -5,16 +5,16 @@
 //! [`is_child_process`] is what tells one of those children from the browser
 //! process.
 //!
-//! Neither macOS nor Linux can initialize CEF from the bare
+//! No platform can initialize CEF from the bare
 //! `target/debug/deps/real_engine-*` cargo builds, and they cannot for
 //! different reasons: `cef_initialize` traps inside the framework when the
-//! macOS browser process is not bundled, while on Linux
+//! macOS browser process is not bundled, while on Linux and Windows
 //! `CefRuntimePaths::packaged` takes the executable's own directory as the
-//! runtime root, and nothing puts `libcef.so`, `icudtl.dat` or `locales/`
-//! there. Both answers are the layout `water package` produces for that
-//! platform — [`macos`] stages an application bundle, [`linux`] a flat runtime
-//! directory — and both re-run the checks from a hard link to this executable
-//! placed inside it.
+//! runtime root, and nothing puts `libcef.so` / `libcef.dll`, `icudtl.dat` or
+//! `locales/` there. Every answer is the layout `water package` produces for
+//! that platform — [`macos`] stages an application bundle, [`flat`] the flat
+//! runtime directory Linux and Windows share — and all of them re-run the
+//! checks from a hard link to this executable placed inside it.
 //!
 //! The staged files are hard links rather than copies: the distribution is
 //! hundreds of megabytes, and a link is indistinguishable from a copy to
@@ -23,13 +23,13 @@
 
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
-mod linux;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod flat;
 #[cfg(target_os = "macos")]
 mod macos;
 
-#[cfg(target_os = "linux")]
-pub use linux::{running_staged, stage};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use flat::{running_staged, stage};
 #[cfg(target_os = "macos")]
 pub use macos::{running_staged, stage};
 
@@ -43,12 +43,11 @@ pub fn workspace() -> PathBuf {
     PathBuf::from(env!("OUT_DIR")).join("real-engine")
 }
 
-/// What the two staging platforms share.
+/// What the staging layouts share.
 ///
-/// Both hard-link this executable and pieces of the CEF distribution into a
-/// directory of their own and write the manifest `CefRuntimePaths::validate`
+/// Each hard-links this executable and pieces of the CEF distribution into a
+/// directory of its own and writes the manifest `CefRuntimePaths::validate`
 /// reads; only the layout around those files differs.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod staged {
     use std::path::{Path, PathBuf};
 
@@ -175,10 +174,22 @@ mod staged {
             if kind.is_dir() {
                 clone_tree(&source, &destination);
             } else if kind.is_symlink() {
-                let target = std::fs::read_link(&source)
-                    .unwrap_or_else(|error| panic!("read link {}: {error}", source.display()));
-                std::os::unix::fs::symlink(target, &destination)
-                    .unwrap_or_else(|error| panic!("link {}: {error}", destination.display()));
+                // Only the macOS framework carries symbolic links, and only a
+                // Unix host stages it. A Windows distribution that grew one
+                // would be staged wrong rather than not at all, so say so.
+                #[cfg(unix)]
+                {
+                    let target = std::fs::read_link(&source)
+                        .unwrap_or_else(|error| panic!("read link {}: {error}", source.display()));
+                    std::os::unix::fs::symlink(target, &destination)
+                        .unwrap_or_else(|error| panic!("link {}: {error}", destination.display()));
+                }
+                #[cfg(not(unix))]
+                panic!(
+                    "the CEF distribution contains a symbolic link at {}, which this host cannot \
+                     reproduce",
+                    source.display()
+                );
             } else {
                 hard_link(&source, &destination);
             }
