@@ -108,11 +108,20 @@ jobs:
           path: wpe-work
           key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
 
+      # The smoke this script ends with has crashed in a way that only happens
+      # at full speed, which is exactly what a debugger perturbs away, so the
+      # kernel is asked to write a core instead: `run-smoke.py` reads
+      # `kernel.core_pattern` to find it and prints the stacks out of it. The
+      # runner's default pattern pipes cores to apport, which leaves nothing on
+      # disk, and the core soft limit is zero.
       - name: Build the WPE runtime from source
         if: steps.runtime.outputs.cache-hit != 'true'
         env:
           WATERUI_WPE_WORK_DIRECTORY: ${{ github.workspace }}/wpe-work
-        run: browser-wpe/runtime/build-runtime.sh runtime-artifacts
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%p
+          ulimit -c unlimited
+          browser-wpe/runtime/build-runtime.sh runtime-artifacts
 
       # `webkit-build-identity` is written by `build-runtime.sh` once the
       # install prefix holds a complete build, so this saves the WebKit half
