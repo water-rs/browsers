@@ -1,3 +1,9 @@
+/* `dladdr` and `Dl_info` are GNU extensions that glibc's <dlfcn.h> hides behind
+ * `__USE_GNU`. CMake compiles this as gnu11, which defines `_DEFAULT_SOURCE`
+ * but not `_GNU_SOURCE`, so the macro has to be asked for here — before any
+ * header, including our own, pulls <features.h> in. */
+#define _GNU_SOURCE
+
 #include "waterui_wpe.h"
 
 #include <dlfcn.h>
@@ -768,10 +774,13 @@ WaterWpePage *water_wpe_page_new(
         "user-content-manager",
         page->content_manager,
         NULL));
-    WebKitSettings *settings = webkit_web_view_get_settings(page->web_view);
-    webkit_settings_set_hardware_acceleration_policy(
-        settings,
-        WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
+    /* No hardware acceleration policy is set here because WPE has none to set.
+     * `WebKitHardwareAccelerationPolicy`, the `hardware-acceleration-policy`
+     * property and both its accessors are all `#if PLATFORM(GTK)` in
+     * `Source/WebKit/UIProcess/API/glib/WebKitSettings.{h.in,cpp}`, and the
+     * release tarball does not even ship the `HardwareAccelerationManager` they
+     * consult. WPE composites on the GPU either way, which is why
+     * `water_view_render_buffer` is handed a DMA-BUF for every frame. */
     page->view = webkit_web_view_get_wpe_view(page->web_view);
     g_assert(WATER_IS_VIEW(page->view));
     ((WaterView *)page->view)->page = page;
@@ -1065,16 +1074,31 @@ static void water_wpe_cookie_added(
     g_clear_error(&error);
 }
 
+/* `wpe-webkit-2.0` is the 2022 GLib API, where a web view reaches its cookies
+ * through its network session: `webkit_web_view_get_website_data_manager` and
+ * `webkit_website_data_manager_get_cookie_manager` are both compiled out by
+ * `#if !ENABLE(2022_GLIB_API)` in `WebKitWebView.h.in` and
+ * `WebKitWebsiteDataManager.h.in`. */
+static WebKitCookieManager *water_wpe_page_cookie_manager(WaterWpePage *page)
+{
+    return webkit_network_session_get_cookie_manager(
+        webkit_web_view_get_network_session(page->web_view));
+}
+
 void water_wpe_page_set_cookie(WaterWpePage *page, const char *cookie)
 {
     const char *uri = webkit_web_view_get_uri(page->web_view);
     g_assert(uri != NULL);
-    SoupCookie *parsed = soup_cookie_parse(cookie, uri);
+    /* libsoup 3 takes the origin as a parsed `GUri`, not as a string. */
+    GError *error = NULL;
+    GUri *origin = g_uri_parse(uri, SOUP_HTTP_URI_FLAGS, &error);
+    if (!origin)
+        g_error("WPE cookie origin '%s' is not a URI: %s", uri, error->message);
+    SoupCookie *parsed = soup_cookie_parse(cookie, origin);
+    g_uri_unref(origin);
     g_assert(parsed != NULL);
-    WebKitCookieManager *manager = webkit_website_data_manager_get_cookie_manager(
-        webkit_web_view_get_website_data_manager(page->web_view));
     webkit_cookie_manager_add_cookie(
-        manager,
+        water_wpe_page_cookie_manager(page),
         parsed,
         NULL,
         water_wpe_cookie_added,
@@ -1169,13 +1193,11 @@ void water_wpe_page_get_cookies(
 {
     const char *uri = webkit_web_view_get_uri(page->web_view);
     g_assert(uri != NULL);
-    WebKitCookieManager *manager = webkit_website_data_manager_get_cookie_manager(
-        webkit_web_view_get_website_data_manager(page->web_view));
     WaterWpeAsyncResult *async = g_new0(WaterWpeAsyncResult, 1);
     async->callback = callback;
     async->user_data = user_data;
     webkit_cookie_manager_get_cookies(
-        manager,
+        water_wpe_page_cookie_manager(page),
         uri,
         NULL,
         water_wpe_cookies_ready,
