@@ -409,6 +409,19 @@ def main() -> None:
     bridge = root / "lib/libwaterui_wpe.so"
     if not bridge.is_file():
         raise RuntimeError(f"WPE bridge was not installed at {bridge}")
+    # Packaging stages into the prefix rather than beside it, so the tree it is
+    # given has to be an installer's output and nothing else: run it twice over
+    # the same one and it meets its own copies, whose RPATHs it has already
+    # rewritten, as a `filecmp` mismatch some way into the dependency closure.
+    # The plugin directory `copy_plugin_packages` creates below is the first
+    # thing staging adds and no part of what CMake installs, so finding one
+    # here means this tree has already been through packaging.
+    staged = root / "lib/gstreamer-1.0"
+    if staged.exists():
+        raise RuntimeError(
+            f"{root} has been packaged before ({staged} is staging output, not "
+            "an installed file); package a freshly installed prefix instead"
+        )
     for tool, requirement in SANDBOX_TOOLS.items():
         if not tool.is_file():
             raise RuntimeError(f"WPE sandbox requires {requirement} at {tool}")

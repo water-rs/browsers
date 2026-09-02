@@ -241,18 +241,33 @@ webkit_options=(
 # the smoke run, which is where a change to this crate lands.
 webkit_identity="$(printf '%s\n' "$source_sha256" "$actual_gcc" "${webkit_options[@]}" | sha256sum | cut -d ' ' -f 1)"
 webkit_installed="$work_directory/webkit-build-identity"
+installed_snapshot="$work_directory/install"
 if [[ "$(cat "$webkit_installed" 2>/dev/null)" != "$webkit_identity" ]]; then
-    rm -rf "$prefix" "$webkit_installed"
+    rm -rf "$prefix" "$installed_snapshot" "$webkit_installed"
     cmake -S "$source_directory" -B "$build_directory" -G Ninja "${webkit_options[@]}"
     cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
     cmake --install "$build_directory"
-    printf '%s\n' "$webkit_identity" > "$webkit_installed"
     # The object tree is nine thousand compilations and tens of gigabytes, and
     # nothing past this point reads it: the bridge compiles against the
     # installed prefix and the packaging copies out of it. Dropping it here is
     # what makes the work directory small enough to keep between runs.
     rm -rf "$build_directory"
+    cp -a "$prefix" "$installed_snapshot"
+    # Written last, so a stamped work directory is one that holds the whole of
+    # this phase's output and not some interrupted part of it.
+    printf '%s\n' "$webkit_identity" > "$webkit_installed"
 fi
+
+# Packaging stages into the prefix: it copies every system library the runtime
+# links into it, rewrites the RPATH of every binary in it and writes the
+# licences and metadata that the smoke run and the archive are then read from.
+# The tree it is handed therefore has to be the installer's own output, which
+# is what the snapshot beside it holds — a second run against a prefix the
+# first one already packaged collides with its own copies. Restoring it to the
+# same path is what keeps it honest: whatever the installer recorded in those
+# binaries still resolves to where it was recorded.
+rm -rf "$prefix"
+cp -a "$installed_snapshot" "$prefix"
 
 bridge_build_directory="$work_directory/bridge-build"
 PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig" \
