@@ -1398,6 +1398,9 @@ void water_wpe_frame_presented(void *user_data)
         NULL);
 }
 
+/* Releasing hands the caller's reference to the queued release, which is the
+ * last one: `water_wpe_frame_released_on_main` drops it after telling the view
+ * the buffer is back. The caller must not touch the token afterwards. */
 void water_wpe_frame_release(void *user_data, int release_fence_fd)
 {
     WaterWpeFrameToken *token = user_data;
@@ -1410,5 +1413,4 @@ void water_wpe_frame_release(void *user_data, int release_fence_fd)
         water_wpe_frame_released_on_main,
         release,
         NULL);
-    water_wpe_frame_token_unref(token);
 }
