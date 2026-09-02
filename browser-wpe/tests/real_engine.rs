@@ -75,6 +75,10 @@ const SECOND_HTML: &str = include_str!("../../tests/pages/second.html");
 const CHECKS_JS: &str = include_str!("../../tests/pages/checks.js");
 const STATE_SEED_JS: &str = include_str!("../../tests/pages/state_seed.js");
 
+// This one is not shared: it is about WPE's own main loop rather than about the
+// bridge contract, and it is injected by the one test that drives the pump.
+const IDLE_TIMER_JS: &str = include_str!("pages/idle_timer.js");
+
 /// The local executor the page's handler replies are spawned onto.
 ///
 /// `WpePage` answers a `waterui.invoke` by spawning the handler's future with
@@ -100,6 +104,7 @@ impl LocalExecutor for TestExecutor {
 struct RealEngine {
     server: Server,
     base: String,
+    runtime: WpeRuntime,
     handle: WpeWebViewHandle,
     executor: TestExecutor,
     events: Rc<RefCell<Vec<BackendEvent>>>,
@@ -154,7 +159,10 @@ impl RealEngine {
         let executor = TestExecutor(Rc::new(AsyncLocalExecutor::new()));
         executor_core::init_local_executor(executor.clone());
 
-        let page = WpePage::new(WpeRuntime::initialize(&runtime_paths()));
+        // The runtime is kept so one test can start its message pump; every
+        // other test drives the loop by hand from `step`.
+        let runtime = WpeRuntime::initialize(&runtime_paths());
+        let page = WpePage::new(runtime.clone());
         // A viewport the engine would lay a document out in; the default is the
         // one-pixel toplevel the bridge creates a view with.
         page.resize(1024, 768, 1.0);
@@ -218,6 +226,7 @@ impl RealEngine {
         Self {
             server,
             base,
+            runtime,
             handle,
             executor,
             events,
@@ -266,8 +275,27 @@ impl RealEngine {
         while self.executor.0.try_tick() {}
     }
 
+    /// One turn of everything except the engine's own loop.
+    ///
+    /// The engine is deliberately left alone here: whatever WPE gets done under
+    /// this step is done by its message pump, which is a task on the very
+    /// executor being ticked.
+    fn idle_step(&self) {
+        self.serve();
+        while self.executor.0.try_tick() {}
+    }
+
     /// Spins until `ready` answers, failing loudly on a load error or a timeout.
-    fn wait_for<T>(&self, what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
+    fn wait_for<T>(&self, what: &str, ready: impl FnMut() -> Option<T>) -> T {
+        self.wait_with(Self::step, what, ready)
+    }
+
+    /// [`Self::wait_for`] without pumping the engine by hand.
+    fn wait_idle<T>(&self, what: &str, ready: impl FnMut() -> Option<T>) -> T {
+        self.wait_with(Self::idle_step, what, ready)
+    }
+
+    fn wait_with<T>(&self, step: fn(&Self), what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             if let Some(value) = ready() {
@@ -278,7 +306,7 @@ impl RealEngine {
                 Instant::now() < deadline,
                 "timed out after {TIMEOUT:?} waiting for {what}"
             );
-            self.step();
+            step(self);
             std::thread::yield_now();
         }
     }
@@ -472,5 +500,46 @@ fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways() {
     assert_eq!(
         echoed.pointer("/small").and_then(Value::as_u64),
         Some(REPRESENTABLE)
+    );
+}
+
+/// A page that is idle has to keep making progress.
+///
+/// This is water-rs/browsers#1. WPE's engine work is a `GMainContext`, which
+/// runs only while somebody iterates it, and the only thing iterating it was
+/// `DmaBufGpuView::render`. A renderer that skips idle frames therefore stopped
+/// the engine exactly when a page had nothing new to draw, and a background
+/// timer, a network completion or a DOM mutation waited for an unrelated event —
+/// a moved pointer — to force a frame that would let it run.
+///
+/// So this test never touches the engine's loop: it serves the page, ticks the
+/// executor, and everything WPE gets done is done by the message pump task.
+/// Without that task nothing is iterated at all and the page does not even load.
+#[test]
+fn a_background_timer_reaches_the_bridge_without_input_or_rendering() {
+    let engine = RealEngine::start();
+    engine.handle.inject_script(
+        "waterui:test-idle-timer",
+        IDLE_TIMER_JS,
+        ScriptInjectionTime::DocumentStart,
+    );
+    engine.runtime.start_message_pump();
+
+    let reported = engine.reports.borrow().len();
+    engine.handle.go_to(&engine.url("/first"));
+    let record = engine.wait_idle("the page's background timer to report", || {
+        engine
+            .reports
+            .borrow()
+            .iter()
+            .skip(reported)
+            .find(|record| record.get("idleTimer").is_some())
+            .cloned()
+    });
+
+    assert_eq!(
+        text(&record, "idleTimer"),
+        "fired",
+        "the timer reported without having applied its DOM mutation"
     );
 }

@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 pub const MAX_PLANES: usize = 4;
 
 #[repr(C)]
@@ -43,6 +43,22 @@ pub struct WaterWpeFrame {
     pub rendering_fence_fd: c_int,
 }
 
+/// One descriptor the runtime's main context wants watched, in `poll(2)` terms.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct WaterWpePollFd {
+    pub fd: c_int,
+    pub events: i16,
+}
+
+/// When the runtime's main context next has work to do.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct WaterWpeReadiness {
+    pub ready: bool,
+    pub timeout_ms: i32,
+}
+
 pub type DestroyNotify = unsafe extern "C" fn(*mut c_void);
 pub type EventCallback =
     unsafe extern "C" fn(*mut c_void, c_uint, *const c_char, *const c_char, c_double);
@@ -58,6 +74,12 @@ pub struct WpeApi {
     pub runtime_new: unsafe extern "C" fn(*mut *mut c_char) -> *mut WaterWpeRuntime,
     pub runtime_free: unsafe extern "C" fn(*mut WaterWpeRuntime),
     pub runtime_iteration: unsafe extern "C" fn(*mut WaterWpeRuntime) -> bool,
+    pub runtime_readiness: unsafe extern "C" fn(
+        *mut WaterWpeRuntime,
+        *mut WaterWpeReadiness,
+        *mut WaterWpePollFd,
+        c_uint,
+    ) -> c_uint,
     pub string_free: unsafe extern "C" fn(*mut c_char),
     pub page_new: unsafe extern "C" fn(
         *mut WaterWpeRuntime,
@@ -136,6 +158,7 @@ impl WpeApi {
                 runtime_new: symbol(library, b"water_wpe_runtime_new\0"),
                 runtime_free: symbol(library, b"water_wpe_runtime_free\0"),
                 runtime_iteration: symbol(library, b"water_wpe_runtime_iteration\0"),
+                runtime_readiness: symbol(library, b"water_wpe_runtime_readiness\0"),
                 string_free: symbol(library, b"water_wpe_string_free\0"),
                 page_new: symbol(library, b"water_wpe_page_new\0"),
                 page_free: symbol(library, b"water_wpe_page_free\0"),

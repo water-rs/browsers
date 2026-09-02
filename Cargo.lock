@@ -3477,6 +3477,7 @@ dependencies = [
  "cookie",
  "executor-core",
  "futures",
+ "futures-timer",
  "keycode",
  "kurbo",
  "libloading 0.9.0",

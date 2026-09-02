@@ -6,14 +6,26 @@
 //! is built against. `libloading` keeps the module mapped for as long as the
 //! `Library` lives, and the `Arc` holding it outlives every resolved pointer.
 
-use std::ffi::{CStr, c_char};
+use std::cell::Cell;
+use std::ffi::{CStr, c_char, c_uint};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::abi::{ABI_VERSION, WaterWpeRuntime, WpeApi};
+use crate::abi::{ABI_VERSION, WaterWpePollFd, WaterWpeReadiness, WaterWpeRuntime, WpeApi};
+use crate::pump::{PumpDeadline, WpePollFd, WpeReadiness};
+
+/// How many descriptors a readiness report is asked for before it has to ask
+/// again with a larger buffer.
+///
+/// A WPE main context watches its own wakeup descriptor plus a handful per web
+/// and network process, so this is sized to answer in one call and grows from
+/// the count the bridge reports when it does not.
+const INITIAL_DESCRIPTOR_CAPACITY: usize = 16;
 
 /// Exact WPE `WebKit` line used by the bundled runtime.
 pub const WPE_WEBKIT_VERSION: &str = "2.52.5";
@@ -168,6 +180,10 @@ unsafe impl Sync for RuntimeApi {}
 struct RuntimeInner {
     api: Arc<RuntimeApi>,
     raw: NonNull<WaterWpeRuntime>,
+    /// Whether [`WpeRuntime::start_message_pump`] already spawned this runtime's
+    /// pump task. Every controller that resolves this runtime asks for it, and
+    /// one main context needs exactly one loop driving it.
+    pump_running: Cell<bool>,
 }
 
 impl Drop for RuntimeInner {
@@ -181,7 +197,7 @@ impl Drop for RuntimeInner {
 /// Main-thread WPE `WebKit` runtime.
 #[derive(Clone)]
 pub struct WpeRuntime {
-    inner: std::rc::Rc<RuntimeInner>,
+    inner: Rc<RuntimeInner>,
 }
 
 impl core::fmt::Debug for WpeRuntime {
@@ -213,7 +229,11 @@ impl WpeRuntime {
             "WPE runtime initialized while also returning an error"
         );
         Self {
-            inner: std::rc::Rc::new(RuntimeInner { api, raw }),
+            inner: Rc::new(RuntimeInner {
+                api,
+                raw,
+                pump_running: Cell::new(false),
+            }),
         }
     }
 
@@ -225,6 +245,104 @@ impl WpeRuntime {
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.inner.api.api.runtime_iteration)(self.inner.raw.as_ptr()) }
+    }
+
+    /// Reports what the runtime's `GLib` main context is waiting for.
+    ///
+    /// Nothing is dispatched: this asks every source when it next wants to run,
+    /// so a host can schedule [`Self::iteration`] against the engine's own
+    /// deadline and descriptors instead of an interval it invented.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the bridge reports more descriptors than a `usize` holds.
+    #[must_use]
+    pub fn readiness(&self) -> WpeReadiness {
+        let mut report = WaterWpeReadiness::default();
+        let mut descriptors = vec![WaterWpePollFd::default(); INITIAL_DESCRIPTOR_CAPACITY];
+        loop {
+            let capacity = c_uint::try_from(descriptors.len())
+                .expect("the WPE descriptor buffer is sized by this crate");
+            // SAFETY: symbol resolved from the bridge library kept mapped by
+            // this runtime; see the module safety note. The buffer is `capacity`
+            // entries long, which is what the bridge is told it may write.
+            let needed = unsafe {
+                (self.inner.api.api.runtime_readiness)(
+                    self.inner.raw.as_ptr(),
+                    &raw mut report,
+                    descriptors.as_mut_ptr(),
+                    capacity,
+                )
+            };
+            let needed = usize::try_from(needed)
+                .expect("the WPE bridge reported more descriptors than a usize holds");
+            if needed <= descriptors.len() {
+                descriptors.truncate(needed);
+                break;
+            }
+            // The bridge wrote nothing and answered with the size it needs; ask
+            // again with a buffer that large, as `g_main_context_query` is used.
+            descriptors.resize(needed, WaterWpePollFd::default());
+        }
+        WpeReadiness::new(
+            report.ready,
+            report.timeout_ms,
+            descriptors
+                .into_iter()
+                .map(|descriptor| WpePollFd::new(descriptor.fd, descriptor.events))
+                .collect(),
+        )
+    }
+
+    /// Dispatches everything WPE has ready and reports when it wants the loop
+    /// back.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the bridge reports more descriptors than a `usize` holds.
+    #[must_use]
+    pub fn pump(&self) -> PumpDeadline {
+        while self.iteration() {}
+        self.readiness().deadline()
+    }
+
+    /// Drives this runtime's main loop from `WaterUI`'s UI executor.
+    ///
+    /// WPE's engine work runs on the thread that created the runtime — the UI
+    /// thread — and it has to keep running whether or not anything is being
+    /// drawn. A page only produces frames while its main context is iterated,
+    /// and a renderer that skips idle frames stops drawing exactly when a page
+    /// has nothing new to show, so a pump that lives inside rendering deadlocks
+    /// the two against each other: no frame, no pump, no frame. Background
+    /// timers, network completions and DOM mutations then wait for an unrelated
+    /// event — a moved pointer — to force a frame. This task is therefore
+    /// independent of every surface, and a page that wakes up asks for a redraw
+    /// through the frame sink's waker.
+    ///
+    /// The loop is paced by `GLib` itself: [`Self::pump`] returns the instant the
+    /// main context asked to be iterated at, and the task sleeps exactly that
+    /// long. Calling this more than once for one runtime is a no-op, so every
+    /// controller that resolves a runtime may ask for it.
+    ///
+    /// The task holds no strong reference to the runtime and ends when the last
+    /// one is dropped.
+    pub fn start_message_pump(&self) {
+        if self.inner.pump_running.replace(true) {
+            return;
+        }
+        let runtime: Weak<RuntimeInner> = Rc::downgrade(&self.inner);
+        executor_core::spawn_local(async move {
+            loop {
+                let Some(inner) = runtime.upgrade() else {
+                    return;
+                };
+                // The strong reference must not be held across the await, or
+                // this task would keep WPE alive for the life of the process.
+                let deadline = Self { inner }.pump().instant();
+                futures_timer::Delay::new(deadline.saturating_duration_since(Instant::now())).await;
+            }
+        })
+        .detach();
     }
 
     pub(super) fn raw(&self) -> NonNull<WaterWpeRuntime> {

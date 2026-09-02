@@ -59,7 +59,14 @@ impl WpeController {
         }
     }
 
-    /// The initialized runtime, loading the staged one on first call.
+    /// The initialized runtime, loading the staged one on first call, with its
+    /// main loop already being pumped.
+    ///
+    /// The pump starts here rather than in [`crate::install`] because this is
+    /// where the runtime first exists: the staged install is only named at
+    /// install time, and a runtime that has not been loaded has no main context
+    /// to drive. Starting it again is a no-op, so every page opened through any
+    /// clone of this controller lands on the one loop.
     ///
     /// # Panics
     ///
@@ -69,13 +76,15 @@ impl WpeController {
     /// backend installs the controller, so the requirement lands on the code
     /// that needs it instead of on every application built with this engine.
     fn runtime(&self) -> WpeRuntime {
-        match self.source.as_ref() {
+        let runtime = match self.source.as_ref() {
             RuntimeSource::Ready(runtime) => runtime.clone(),
             RuntimeSource::Packaged { paths, runtime } => runtime
                 .borrow_mut()
                 .get_or_insert_with(|| WpeRuntime::initialize(paths))
                 .clone(),
-        }
+        };
+        runtime.start_message_pump();
+        runtime
     }
 
     /// Dispatches all currently-ready WPE tasks.

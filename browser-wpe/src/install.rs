@@ -29,6 +29,12 @@ use crate::{WpeController, WpeWebViewHandle, gpu_view_with_input};
 /// is not loaded until the first page opens — and registers the hook that draws
 /// every `WebView` into a GPU surface.
 ///
+/// Opening that first page also starts the runtime's message pump on this
+/// application's local executor (see
+/// [`WpeRuntime::start_message_pump`](crate::WpeRuntime::start_message_pump)),
+/// so background timers, network completions and DOM mutations keep making
+/// progress in a view that is idle and drawing nothing.
+///
 /// # Panics
 ///
 /// Panics when a `WebView` realization is already installed. Two engines cannot
