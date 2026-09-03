@@ -232,6 +232,13 @@ sudo apt-get install -y --no-install-recommends \
 # plugin, Thunder, JSC's restricted options — held at their production values
 # explicitly. What remains of it is the run-time `WEBKIT_*` environment hooks
 # and `-fno-omit-frame-pointer`.
+#
+# `Tools/` is off altogether: the release tarball ships it as two CMake files
+# and nothing else, developer mode would `add_subdirectory(flatpak)` into the
+# directory the tarball left out, and every target under it — API tests, layout
+# tests, MiniBrowser — is one this runtime does not build. `CLANGD_AUTO_SETUP`,
+# which developer mode also turns on, writes editor configuration into the
+# source tree; nothing edits this tree.
 webkit_options=(
     -DPORT=WPE
     -DCMAKE_BUILD_TYPE=Release
@@ -240,6 +247,7 @@ webkit_options=(
     -DCMAKE_INSTALL_LIBEXECDIR=libexec
     -DCMAKE_C_COMPILER="$c_compiler"
     -DCMAKE_CXX_COMPILER="$cxx_compiler"
+    -DCLANGD_AUTO_SETUP=OFF
     -DBWRAP_EXECUTABLE=/usr/bin/bwrap
     -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy
     -DDEVELOPER_MODE=ON
@@ -253,6 +261,7 @@ webkit_options=(
     -DENABLE_LAYOUT_TESTS=OFF
     -DENABLE_MINIBROWSER=OFF
     -DENABLE_THUNDER=OFF
+    -DENABLE_TOOLS=OFF
     -DENABLE_WPE_LEGACY_API=OFF
     -DENABLE_WPE_PLATFORM=ON
     -DENABLE_WPE_PLATFORM_DRM=OFF
