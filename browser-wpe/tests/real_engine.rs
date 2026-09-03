@@ -47,8 +47,8 @@ use tiny_http::{Header, Response, Server};
 use waterui_browser_wpe::{WpePage, WpeRuntime, WpeRuntimePaths, WpeWebViewHandle};
 use waterui_url::Url;
 use waterui_webview::{
-    BackendEvent, IntoJsReply, JsReply, Json, ScriptInjectionTime, ScriptMessageHandler,
-    WatcherGuard, WebViewEvent, WebViewHandle as _,
+    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
+    ScriptMessageHandler, WatcherGuard, WebViewEvent, WebViewHandle as _,
 };
 
 /// Names the staged WPE runtime root these tests drive.
@@ -169,6 +169,18 @@ impl RealEngine {
         // Exactly what `WpeController::open` builds: the handle installs the
         // transport adapter and the shared document-start bridge script.
         let handle = WpeWebViewHandle::new(page);
+        // And what the framework does next, which a handle built by hand does
+        // not get: every registered handler is a capability, so the backend
+        // denies a document it cannot authenticate — and with no policy at all
+        // that is every document, silently, from the page's point of view. An
+        // application opened at this URL is granted its own origin, which is
+        // what `BridgeOrigins::Initial` means.
+        handle.set_bridge_origins(OriginPolicy::new(
+            BridgeOrigins::Initial,
+            &base
+                .parse()
+                .expect("the local page server address is a URL"),
+        ));
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({
