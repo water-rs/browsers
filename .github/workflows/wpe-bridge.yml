@@ -8,11 +8,12 @@ name: WPE Bridge
 # found one dispatch at a time while landing water-rs/browsers#26 — each one
 # hidden behind the previous.
 #
-# This job compiles the bridge on a pull request in minutes, out of the cache
-# that dispatch already fills. It builds nothing itself: the WPE runtime is
-# whatever the last real-engine run packaged, restored from the same cache under
-# the same key. It is not a substitute for that workflow — nothing here runs the
-# engine — it is the compiler pass, moved off the dispatch and onto the change.
+# This job compiles the bridge on a pull request in minutes, against a runtime
+# that dispatch already published. It builds nothing itself: the WPE runtime is
+# whatever the last real-engine run packaged, downloaded from the `wpe-runtime`
+# prerelease that workflow uploads to (#31). It is not a substitute for that
+# workflow — nothing here runs the engine — it is the compiler pass, moved off
+# the dispatch and onto the change.
 
 permissions:
   contents: read
@@ -57,30 +58,39 @@ jobs:
             cmake ninja-build pkg-config gcc-12 g++-12 unzip \
             libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libdrm-dev
 
-      # The packaged runtime `wpe-real-engine.yml` produces, under that
-      # workflow's own key so the two share one entry. The prefix inside it does
-      # not depend on `native/**` — the bridge is a single shared object beside
-      # WebKit's, and nothing here reads it — while the key does, so a pull
-      # request that touches the bridge (which is every pull request this job
-      # exists for) misses the exact key by construction. That is what the
-      # prefix fallback is: any packaged runtime for this platform holds the
-      # headers and libraries the bridge compiles against.
-      - name: Restore the packaged WPE runtime
-        id: runtime
-        uses: actions/cache/restore@v4
-        with:
-          path: runtime-artifacts
-          key: wpe-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}
-          restore-keys: |
-            wpe-runtime-${{ runner.os }}-${{ runner.arch }}-
-
-      # Skipping instead would leave a green check over a bridge nobody
-      # compiled, which is the state this job exists to end.
-      - name: Require a packaged WPE runtime
-        if: steps.runtime.outputs.cache-matched-key == ''
+      # The packaged runtime `wpe-real-engine.yml` publishes, under that
+      # workflow's own naming: `wpe-runtime-<version>-<os>-<arch>-<hash>.zip`,
+      # where the hash covers `runtime/**` and `native/**`. The prefix inside
+      # it does not depend on `native/**` — the bridge is a single shared
+      # object beside WebKit's, and nothing here reads it — while the hash
+      # does, so a pull request that touches the bridge (which is every pull
+      # request this job exists for) misses the exact name by construction.
+      # The exact asset is taken when it exists, and otherwise the newest one
+      # for the pinned version on this platform: any packaging of that release
+      # holds the headers and libraries the bridge compiles against.
+      #
+      # Skipping when none exists would leave a green check over a bridge
+      # nobody compiled, which is the state this job exists to end.
+      - name: Download the published WPE runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::error::No wpe-runtime-${{ runner.os }}-${{ runner.arch }}-* cache entry exists, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and caches the runtime, and every later run of this job restores it in seconds."
-          exit 1
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+          test -n "$version"
+          prefix="wpe-runtime-$version-${{ runner.os }}-${{ runner.arch }}-"
+          exact="${prefix}${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}.zip"
+          # shellcheck disable=SC2016 # `$exact` and `$prefix` are jq's, bound by --arg
+          asset="$(gh release view wpe-runtime --json assets \
+            --jq --arg exact "$exact" --arg prefix "$prefix" \
+            '(.assets | map(select(.name == $exact))) + (.assets | map(select(.name | startswith($prefix))) | sort_by(.updatedAt) | reverse) | .[0].name // empty' \
+            2>/dev/null || true)"
+          if [[ -z "$asset" ]]; then
+            echo "::error::The wpe-runtime release holds no ${prefix}*.zip, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and publishes the runtime, and every later run of this job downloads it in seconds."
+            exit 1
+          fi
+          mkdir -p runtime-artifacts
+          gh release download wpe-runtime --pattern "$asset" --dir runtime-artifacts
 
       # WebKit writes its pkg-config files with `libdir=@LIB_INSTALL_DIR@`, and
       # `Source/cmake/OptionsWPE.cmake` sets that to `CMAKE_INSTALL_FULL_LIBDIR`
@@ -92,7 +102,7 @@ jobs:
       - name: Stage the packaged runtime at the prefix it was built at
         shell: bash
         run: |
-          archive="$(echo runtime-artifacts/waterui-wpe-*.zip)"
+          archive="$(echo runtime-artifacts/*.zip)"
           test -f "$archive"
           unzip -q "$archive" -d staged-runtime
           descriptor=staged-runtime/lib/pkgconfig/wpe-webkit-2.0.pc
@@ -105,14 +115,14 @@ jobs:
           mkdir -p "$(dirname "$prefix")"
           rm -rf "$prefix"
           mv staged-runtime "$prefix"
-          # The fallback above will restore a runtime built from an older pin
-          # rather than nothing at all, and compiling the bridge against the
-          # wrong WPE API would answer a question nobody asked. `runtime.json`
-          # is what `package-runtime.py` recorded the archive as being.
+          # The asset name carries the pin, and this is the archive's own word
+          # on it — `runtime.json` is what `package-runtime.py` recorded the
+          # archive as being. Compiling the bridge against the wrong WPE API
+          # would answer a question nobody asked.
           pinned="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
           packaged="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$prefix/runtime.json")"
           if [[ "$pinned" != "$packaged" ]]; then
-              echo "::error::The cached WPE runtime is $packaged and browser-wpe/runtime/source.toml pins $pinned. Run the 'WPE Real Engine' workflow once to build and cache a runtime for the current pin."
+              echo "::error::The published WPE runtime is $packaged and browser-wpe/runtime/source.toml pins $pinned. Run the 'WPE Real Engine' workflow once to build and publish a runtime for the current pin."
               exit 1
           fi
           echo "WATERUI_WPE_PREFIX=$prefix" >> "$GITHUB_ENV"
