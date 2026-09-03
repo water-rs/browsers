@@ -198,9 +198,14 @@ def copy_settings_schemas(root: pathlib.Path) -> list[pathlib.Path]:
     """
     staged = root / "share/glib-2.0/schemas"
     installed = pathlib.Path("/usr/share/glib-2.0/schemas")
+    # `glib-compile-schemas` reads three kinds of file, and a schema is only as
+    # portable as the definitions it refers to: `org.gnome.system.proxy` names
+    # `<enum id='org.gnome.desktop.GDesktopProxyMode'>`, which lives in an
+    # `.enums.xml` beside it. Copying only the schemas left every enum-using
+    # file uncompilable.
     copied = [
         copy_file(source, staged / source.name)
-        for pattern in ("*.gschema.xml", "*.gschema.override")
+        for pattern in ("*.gschema.xml", "*.enums.xml", "*.gschema.override")
         for source in sorted(installed.glob(pattern))
     ]
     if not copied:
@@ -208,9 +213,45 @@ def copy_settings_schemas(root: pathlib.Path) -> list[pathlib.Path]:
             f"no GSettings schemas to package: {installed} is empty, so the "
             "runtime's GIO modules would abort the first time they read one"
         )
-    run("glib-compile-schemas", str(staged))
+    # `--strict` because the default is to report a file it cannot compile, skip
+    # it, and exit successfully — which is how a runtime shipped a schema source
+    # with the proxy schema quietly missing from it.
+    run("glib-compile-schemas", "--strict", str(staged))
     copied.append(staged / "gschemas.compiled")
+    verify_settings_schemas(staged)
     return copied
+
+
+def verify_settings_schemas(staged: pathlib.Path) -> None:
+    """Fails the build unless the packaged source really carries the schemas.
+
+    The question is about the artifact, not about the machine that built it, so
+    the host's own schemas are taken out of the search path first: `XDG_DATA_DIRS`
+    is pointed at the packaged `share` directory, which is exactly what
+    `water_wpe_configure_runtime_paths` does when the runtime runs.
+    """
+    share = staged.parent.parent
+    listed = subprocess.run(
+        ("gsettings", "--schemadir", str(staged), "list-schemas"),
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        env={
+            **os.environ,
+            "XDG_DATA_DIRS": str(share),
+            "GSETTINGS_SCHEMA_DIR": str(staged),
+        },
+    ).stdout.split()
+    # The proxy resolver is the module that reads GSettings on every network
+    # load, so its schema is the one whose absence kills the network process.
+    missing = [name for name in ("org.gnome.system.proxy",) if name not in listed]
+    if missing:
+        raise RuntimeError(
+            f"the packaged schema source at {staged} is missing "
+            f"{', '.join(missing)}: it carries {len(listed)} schemas, and the "
+            "runtime's network process aborts on the first network load "
+            "without them"
+        )
 
 
 def dependency_paths(path: pathlib.Path) -> list[Dependency]:
