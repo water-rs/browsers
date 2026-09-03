@@ -217,6 +217,28 @@ sudo apt-get install -y --no-install-recommends \
 #     `HAVE()`-guarded and is unaffected. `USE_GBM` and `USE_LIBDRM` stay on —
 #     `ENABLE_GPU_PROCESS` requires them and the headless platform allocates its
 #     buffers through GBM — so the DMA-BUF path is untouched.
+# The runtime ships inside an application and is unpacked wherever that
+# application lands, never at the prefix it was built at, so every path WebKit
+# compiles in has to be overridable at run time. `native/waterui_wpe.c` exports
+# `WEBKIT_EXEC_PATH` (the helper processes) and `WEBKIT_INJECTED_BUNDLE_PATH`
+# from the runtime's own location before the engine starts, but WebKit reads
+# `WEBKIT_EXEC_PATH` only when built with `DEVELOPER_MODE`
+# (`Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp`); a production
+# build spawns `WPENetworkProcess` from the compiled-in `PKGLIBEXECDIR` and
+# nowhere else, so a relocated runtime cannot open a page. Developer mode is
+# therefore on, and what it drags along is put back: `-Werror` off (a release
+# compiled by a newer GCC is not ours to keep warning-free), and the options
+# whose defaults it flips — API tests, layout tests, MiniBrowser, the Qt
+# plugin, Thunder, JSC's restricted options — held at their production values
+# explicitly. What remains of it is the run-time `WEBKIT_*` environment hooks
+# and `-fno-omit-frame-pointer`.
+#
+# `Tools/` is off altogether: the release tarball ships it as two CMake files
+# and nothing else, developer mode would `add_subdirectory(flatpak)` into the
+# directory the tarball left out, and every target under it — API tests, layout
+# tests, MiniBrowser — is one this runtime does not build. `CLANGD_AUTO_SETUP`,
+# which developer mode also turns on, writes editor configuration into the
+# source tree; nothing edits this tree.
 webkit_options=(
     -DPORT=WPE
     -DCMAKE_BUILD_TYPE=Release
@@ -225,18 +247,25 @@ webkit_options=(
     -DCMAKE_INSTALL_LIBEXECDIR=libexec
     -DCMAKE_C_COMPILER="$c_compiler"
     -DCMAKE_CXX_COMPILER="$cxx_compiler"
+    -DCLANGD_AUTO_SETUP=OFF
     -DBWRAP_EXECUTABLE=/usr/bin/bwrap
     -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy
+    -DDEVELOPER_MODE=ON
+    -DDEVELOPER_MODE_FATAL_WARNINGS=OFF
     -DENABLE_API_TESTS=OFF
     -DENABLE_BUBBLEWRAP_SANDBOX=ON
     -DENABLE_DOCUMENTATION=OFF
     -DENABLE_INTROSPECTION=OFF
+    -DENABLE_JSC_RESTRICTED_OPTIONS_BY_DEFAULT=OFF
     -DENABLE_JOURNALD_LOG=OFF
     -DENABLE_LAYOUT_TESTS=OFF
     -DENABLE_MINIBROWSER=OFF
+    -DENABLE_THUNDER=OFF
+    -DENABLE_TOOLS=OFF
     -DENABLE_WPE_LEGACY_API=OFF
     -DENABLE_WPE_PLATFORM=ON
     -DENABLE_WPE_PLATFORM_DRM=OFF
+    -DENABLE_WPE_QT_API=OFF
     -DUSE_JPEGXL=OFF
     -DUSE_LIBBACKTRACE=OFF
 )
