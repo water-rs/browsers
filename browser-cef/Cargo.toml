@@ -30,7 +30,7 @@ chromium = [
     "dep:waterui-chromium",
     "dep:waterui-webview",
 ]
-real-engine = ["cef-runtime", "webview"]
+real-engine = ["cef-runtime", "webview", "waterui-webview/conformance"]
 webview = ["dep:cookie", "dep:keycode", "dep:waterui-str", "dep:waterui-webview"]
 
 [dependencies]

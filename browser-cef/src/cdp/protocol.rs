@@ -146,11 +146,11 @@ pub struct EvaluateResponse {
 #[derive(Debug, Deserialize)]
 pub struct RemoteObject {
     /// The value, when it could be returned by value.
+    ///
+    /// Absent for `undefined` and for values `DevTools` can only describe, such
+    /// as a function; the raw reply is `null` for those.
     #[serde(default)]
     pub value: Option<serde_json::Value>,
-    /// A human-readable description, for values that cannot be.
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 /// Why an evaluation failed.
