@@ -47,8 +47,8 @@ use tiny_http::{Header, Response, Server};
 use waterui_browser_wpe::{WpePage, WpeRuntime, WpeRuntimePaths, WpeWebViewHandle};
 use waterui_url::Url;
 use waterui_webview::{
-    BackendEvent, IntoJsReply, JsReply, Json, ScriptInjectionTime, ScriptMessageHandler,
-    WatcherGuard, WebViewEvent, WebViewHandle as _,
+    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
+    ScriptMessageHandler, WatcherGuard, WebViewEvent, WebViewHandle as _,
 };
 
 /// Names the staged WPE runtime root these tests drive.
@@ -169,6 +169,18 @@ impl RealEngine {
         // Exactly what `WpeController::open` builds: the handle installs the
         // transport adapter and the shared document-start bridge script.
         let handle = WpeWebViewHandle::new(page);
+        // And what the framework does next, which a handle built by hand does
+        // not get: every registered handler is a capability, so the backend
+        // denies a document it cannot authenticate — and with no policy at all
+        // that is every document, silently, from the page's point of view. An
+        // application opened at this URL is granted its own origin, which is
+        // what `BridgeOrigins::Initial` means.
+        handle.set_bridge_origins(OriginPolicy::new(
+            BridgeOrigins::Initial,
+            &base
+                .parse()
+                .expect("the local page server address is a URL"),
+        ));
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({
@@ -416,6 +428,49 @@ fn navigation_reaches_each_url_and_history_moves_both_ways() {
     engine.navigate("the engine to go forward", || engine.handle.go_forward());
     assert_eq!(engine.location(), engine.url("/second").as_str());
     assert!(!engine.handle.can_go_forward());
+}
+
+/// The raw evaluation path answers with the JSON encoding of the value.
+///
+/// Unquoted, an answer is not parseable: `location.href` and a page that
+/// returned the six characters `"first"` are the same nine bytes, and the
+/// fixture's own `location` reader has to guess which it got. The engine's
+/// `jsc_value_to_json` is what encodes it, so a string arrives quoted and an
+/// object arrives as an object.
+#[test]
+fn the_raw_evaluation_path_answers_with_json() {
+    let engine = RealEngine::start();
+    engine.open("/first");
+
+    let string = engine
+        .block_on(engine.handle.run_javascript("'waterui'"))
+        .expect("a string literal evaluates");
+    assert_eq!(
+        string.as_str(),
+        "\"waterui\"",
+        "a string result arrives as JSON, quoted"
+    );
+
+    let object = engine
+        .block_on(
+            engine
+                .handle
+                .run_javascript("({name: 'waterui', ok: true})"),
+        )
+        .expect("an object literal evaluates");
+    let decoded: Value = serde_json::from_str(&object)
+        .unwrap_or_else(|error| panic!("run_javascript answered `{object}`, not JSON: {error}"));
+    assert_eq!(text(&decoded, "name"), "waterui");
+    assert_eq!(field(&decoded, "ok"), &Value::Bool(true));
+
+    let nothing = engine
+        .block_on(engine.handle.run_javascript("undefined"))
+        .expect("undefined evaluates");
+    assert_eq!(
+        nothing.as_str(),
+        "null",
+        "JSON has no undefined; the typed path is where it stays distinct"
+    );
 }
 
 /// The reply a handler returns has to arrive as the value it returned.

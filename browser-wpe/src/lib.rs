@@ -8,11 +8,18 @@
 //! and passes dma-buf file descriptors — so this crate is empty elsewhere,
 //! the same way `waterui-gtk` is.
 //!
-//! The frames themselves are [`wgpu_external_frame::dma_buf::DmaBufFrame`]s:
-//! importing a dma-buf into a `wgpu` texture is a general problem, so it lives
-//! in a crate that knows nothing about WPE or `WaterUI`. What is WPE's is the
-//! buffer lease ([`WpeFrameLease`]) and the compositing view built on top
-//! ([`DmaBufGpuView`]).
+//! A frame arrives in whichever platform buffer WPE rendered into, which
+//! [`BrowserFrame`] is the choice between. A display with a DRM render node
+//! renders into a dma-buf, which crosses as a
+//! [`wgpu_external_frame::dma_buf::DmaBufFrame`] and imports into a texture with
+//! no copy — importing a dma-buf is a general problem, so it lives in a crate
+//! that knows nothing about WPE or `WaterUI`. A display without one — a
+//! container, a virtual machine, a hosted CI runner — renders into shared
+//! memory, which crosses as an [`ShmFrame`] and is uploaded into the same
+//! texture. Neither is a fallback for the other: WPE Platform picks the kind
+//! from what the host can do. What is WPE's either way is the buffer lease
+//! ([`WpeFrameLease`]) and the compositing view built on top
+//! ([`BrowserGpuView`]).
 //!
 //! # Testing against the real engine
 //!
@@ -24,7 +31,7 @@
 
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod abi;
-#[cfg(all(feature = "webview", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod frame;
 #[cfg(target_os = "linux")]
 mod gpu;
@@ -32,6 +39,8 @@ mod gpu;
 mod input;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod install;
+#[cfg(all(feature = "webview", target_os = "linux"))]
+mod lease;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod page;
 #[cfg(all(feature = "webview", target_os = "linux"))]
@@ -41,16 +50,18 @@ mod runtime;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod webview;
 
-#[cfg(all(feature = "webview", target_os = "linux"))]
-pub use frame::WpeFrameLease;
 #[cfg(target_os = "linux")]
-pub use gpu::{DmaBufFrameSource, DmaBufGpuView};
+pub use frame::{BrowserFrame, ShmFormat, ShmFrame};
+#[cfg(target_os = "linux")]
+pub use gpu::{BrowserFrameSource, BrowserGpuView};
 #[cfg(all(target_os = "linux", feature = "webview"))]
 pub use gpu::{WpeGpuView, gpu_view_with_input};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use input::{WpeInputGpuView, WpeSurfaceInput};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use install::install;
+#[cfg(all(feature = "webview", target_os = "linux"))]
+pub use lease::WpeFrameLease;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use page::{PointerButton, WpePage};
 #[cfg(all(feature = "webview", target_os = "linux"))]

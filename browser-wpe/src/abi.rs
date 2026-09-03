@@ -6,8 +6,13 @@
 
 use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 pub const MAX_PLANES: usize = 4;
+
+/// `WATER_WPE_FRAME_DMA_BUF`: the frame carries exported DMA-BUF planes.
+pub const FRAME_KIND_DMA_BUF: c_uint = 0;
+/// `WATER_WPE_FRAME_SHM`: the frame carries a shared-memory mapping.
+pub const FRAME_KIND_SHM: c_uint = 1;
 
 #[repr(C)]
 pub struct WaterWpeRuntime {
@@ -28,19 +33,40 @@ pub struct WaterWpeBytes {
     pub destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
+/// One frame of page output, tagged by [`WaterWpeFrame::kind`].
+///
+/// Field order mirrors `WaterWpeFrame` in `native/waterui_wpe.h` exactly, and
+/// the tests below pin the offsets it produces: the fields are grouped by width
+/// so that neither compiler inserts padding. A field belonging to the other kind
+/// is zero, or `-1` for a descriptor.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct WaterWpeFrame {
     pub token: *mut c_void,
+    /// Shared memory: first byte of the top row, valid until the frame's token
+    /// is released.
+    pub data: *const u8,
+    /// Shared memory: bytes `data` addresses.
+    pub len: usize,
+    /// DMA-BUF: DRM format modifier.
+    pub modifier: u64,
+    /// [`FRAME_KIND_DMA_BUF`] or [`FRAME_KIND_SHM`].
+    pub kind: c_uint,
     pub width: c_uint,
     pub height: c_uint,
+    /// DMA-BUF: DRM fourcc.
     pub format: c_uint,
-    pub modifier: u64,
+    /// Shared memory: `WPEPixelFormat`.
+    pub pixel_format: c_uint,
+    /// Shared memory: bytes between adjacent rows.
+    pub stride: c_uint,
+    /// DMA-BUF: planes described by the three arrays below.
     pub n_planes: c_uint,
+    /// DMA-BUF: the buffer's rendering fence, or `-1` when it has none.
+    pub rendering_fence_fd: c_int,
     pub fds: [c_int; MAX_PLANES],
     pub offsets: [c_uint; MAX_PLANES],
     pub strides: [c_uint; MAX_PLANES],
-    pub rendering_fence_fd: c_int,
 }
 
 /// One descriptor the runtime's main context wants watched, in `poll(2)` terms.
@@ -193,5 +219,104 @@ impl WpeApi {
                 frame_release: symbol(library, b"water_wpe_frame_release\0"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WaterWpeFrame;
+    use std::ffi::{c_int, c_uint, c_void};
+    use std::mem::{align_of, offset_of, size_of};
+
+    /// The bridge writes this struct and this crate reads it, so the two
+    /// declarations agreeing is the whole contract. Nothing here can ask the C
+    /// compiler what it produced, so what is pinned is the property the C
+    /// declaration is written for: the fields are grouped widest-first, in one
+    /// order, with no padding anywhere.
+    #[test]
+    fn frame_layout_is_packed_in_declaration_order() {
+        let fields = [
+            (
+                "token",
+                offset_of!(WaterWpeFrame, token),
+                size_of::<*mut c_void>(),
+            ),
+            (
+                "data",
+                offset_of!(WaterWpeFrame, data),
+                size_of::<*const u8>(),
+            ),
+            ("len", offset_of!(WaterWpeFrame, len), size_of::<usize>()),
+            (
+                "modifier",
+                offset_of!(WaterWpeFrame, modifier),
+                size_of::<u64>(),
+            ),
+            ("kind", offset_of!(WaterWpeFrame, kind), size_of::<c_uint>()),
+            (
+                "width",
+                offset_of!(WaterWpeFrame, width),
+                size_of::<c_uint>(),
+            ),
+            (
+                "height",
+                offset_of!(WaterWpeFrame, height),
+                size_of::<c_uint>(),
+            ),
+            (
+                "format",
+                offset_of!(WaterWpeFrame, format),
+                size_of::<c_uint>(),
+            ),
+            (
+                "pixel_format",
+                offset_of!(WaterWpeFrame, pixel_format),
+                size_of::<c_uint>(),
+            ),
+            (
+                "stride",
+                offset_of!(WaterWpeFrame, stride),
+                size_of::<c_uint>(),
+            ),
+            (
+                "n_planes",
+                offset_of!(WaterWpeFrame, n_planes),
+                size_of::<c_uint>(),
+            ),
+            (
+                "rendering_fence_fd",
+                offset_of!(WaterWpeFrame, rendering_fence_fd),
+                size_of::<c_int>(),
+            ),
+            (
+                "fds",
+                offset_of!(WaterWpeFrame, fds),
+                size_of::<[c_int; super::MAX_PLANES]>(),
+            ),
+            (
+                "offsets",
+                offset_of!(WaterWpeFrame, offsets),
+                size_of::<[c_uint; super::MAX_PLANES]>(),
+            ),
+            (
+                "strides",
+                offset_of!(WaterWpeFrame, strides),
+                size_of::<[c_uint; super::MAX_PLANES]>(),
+            ),
+        ];
+        let mut next = 0;
+        for (name, offset, size) in fields {
+            assert_eq!(
+                offset, next,
+                "WaterWpeFrame.{name} is not where the C declaration puts it"
+            );
+            next = offset + size;
+        }
+        assert_eq!(
+            size_of::<WaterWpeFrame>(),
+            next,
+            "WaterWpeFrame must carry no tail padding"
+        );
+        assert_eq!(align_of::<WaterWpeFrame>(), align_of::<u64>());
     }
 }

@@ -100,15 +100,37 @@ if [[ "$highest_glibc" != "$maximum_glibc" ]]; then
     exit 1
 fi
 
-work_directory="$(mktemp -d)"
-trap 'rm -rf "$work_directory"' EXIT
+# Compiling WPE WebKit takes hours, and nothing about it depends on this
+# crate's own sources. A caller that can keep the unpacked release and the
+# installed prefix between runs — CI restores them from a cache keyed on the
+# pin and this script — names that directory in
+# `WATERUI_WPE_WORK_DIRECTORY`, and the phases below reuse whatever of it is
+# already there. Unset, the build happens in a temporary directory that goes
+# away with the script, which is what a one-off invocation wants.
+if [[ -n "${WATERUI_WPE_WORK_DIRECTORY:-}" ]]; then
+    work_directory="$(mkdir -p "$WATERUI_WPE_WORK_DIRECTORY" && cd "$WATERUI_WPE_WORK_DIRECTORY" && pwd)"
+else
+    work_directory="$(mktemp -d)"
+    trap 'rm -rf "$work_directory"' EXIT
+fi
 archive="$work_directory/wpewebkit.tar.xz"
-curl --fail --location --retry 3 --output "$archive" "$source_url"
-printf '%s  %s\n' "$source_sha256" "$archive" | sha256sum --check
-tar -xJf "$archive" -C "$work_directory"
 source_directory="$work_directory/wpewebkit-$version"
 build_directory="$work_directory/build"
 prefix="$work_directory/runtime"
+source_identity="$work_directory/webkit-source-identity"
+
+# Ninja and CMake both decide what to redo from file timestamps, so a source
+# tree that is already the pinned release is left untouched: re-extracting it
+# would restamp every file. The identity written beside it is the digest the
+# tree was unpacked from, so changing the pin still replaces it.
+if [[ "$(cat "$source_identity" 2>/dev/null)" != "$source_sha256" ]]; then
+    rm -rf "$source_directory" "$source_identity"
+    curl --fail --location --retry 3 --output "$archive" "$source_url"
+    printf '%s  %s\n' "$source_sha256" "$archive" | sha256sum --check
+    tar -xJf "$archive" -C "$work_directory"
+    rm -f "$archive"
+    printf '%s\n' "$source_sha256" > "$source_identity"
+fi
 
 # `Tools/wpe/dependencies/apt` sources this file and the release tarball does
 # not ship it, so upstream's own installer exits before installing anything.
@@ -144,11 +166,19 @@ sed -i '/git-svn/d' \
 sudo apt-get install -y --no-install-recommends libunwind-dev
 
 sudo "$source_directory/Tools/wpe/install-dependencies"
+# `gsettings-desktop-schemas` and `libglib2.0-bin` are for the packaged runtime
+# rather than for the build: the GIO modules the package stages read GSettings,
+# and a schema they cannot find is a `g_error` that kills the network process on
+# the first network load. The first package carries the schemas the proxy
+# resolver reads, the second carries `glib-compile-schemas`, and
+# `package-runtime.py` compiles them into the artifact.
 sudo apt-get install -y --no-install-recommends \
     bubblewrap \
     cmake \
+    gsettings-desktop-schemas \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
+    libglib2.0-bin \
     ninja-build \
     patchelf \
     pax-utils \
@@ -187,33 +217,65 @@ sudo apt-get install -y --no-install-recommends \
 #     `HAVE()`-guarded and is unaffected. `USE_GBM` and `USE_LIBDRM` stay on —
 #     `ENABLE_GPU_PROCESS` requires them and the headless platform allocates its
 #     buffers through GBM — so the DMA-BUF path is untouched.
-cmake \
-    -S "$source_directory" \
-    -B "$build_directory" \
-    -G Ninja \
-    -DPORT=WPE \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$prefix" \
-    -DCMAKE_INSTALL_LIBDIR=lib \
-    -DCMAKE_INSTALL_LIBEXECDIR=libexec \
-    -DCMAKE_C_COMPILER="$c_compiler" \
-    -DCMAKE_CXX_COMPILER="$cxx_compiler" \
-    -DBWRAP_EXECUTABLE=/usr/bin/bwrap \
-    -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy \
-    -DENABLE_API_TESTS=OFF \
-    -DENABLE_BUBBLEWRAP_SANDBOX=ON \
-    -DENABLE_DOCUMENTATION=OFF \
-    -DENABLE_INTROSPECTION=OFF \
-    -DENABLE_JOURNALD_LOG=OFF \
-    -DENABLE_LAYOUT_TESTS=OFF \
-    -DENABLE_MINIBROWSER=OFF \
-    -DENABLE_WPE_LEGACY_API=OFF \
-    -DENABLE_WPE_PLATFORM=ON \
-    -DENABLE_WPE_PLATFORM_DRM=OFF \
-    -DUSE_JPEGXL=OFF \
+webkit_options=(
+    -DPORT=WPE
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$prefix"
+    -DCMAKE_INSTALL_LIBDIR=lib
+    -DCMAKE_INSTALL_LIBEXECDIR=libexec
+    -DCMAKE_C_COMPILER="$c_compiler"
+    -DCMAKE_CXX_COMPILER="$cxx_compiler"
+    -DBWRAP_EXECUTABLE=/usr/bin/bwrap
+    -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy
+    -DENABLE_API_TESTS=OFF
+    -DENABLE_BUBBLEWRAP_SANDBOX=ON
+    -DENABLE_DOCUMENTATION=OFF
+    -DENABLE_INTROSPECTION=OFF
+    -DENABLE_JOURNALD_LOG=OFF
+    -DENABLE_LAYOUT_TESTS=OFF
+    -DENABLE_MINIBROWSER=OFF
+    -DENABLE_WPE_LEGACY_API=OFF
+    -DENABLE_WPE_PLATFORM=ON
+    -DENABLE_WPE_PLATFORM_DRM=OFF
+    -DUSE_JPEGXL=OFF
     -DUSE_LIBBACKTRACE=OFF
-cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
-cmake --install "$build_directory"
+)
+
+# What the installed prefix contains is decided by the release it was built
+# from, the options above and the compiler that read them, so those three are
+# what the prefix is stamped with. A work directory carried over from an
+# earlier run whose stamp still matches already holds this exact build, and the
+# hours go to whatever comes after it instead — the bridge, the packaging and
+# the smoke run, which is where a change to this crate lands.
+webkit_identity="$(printf '%s\n' "$source_sha256" "$actual_gcc" "${webkit_options[@]}" | sha256sum | cut -d ' ' -f 1)"
+webkit_installed="$work_directory/webkit-build-identity"
+installed_snapshot="$work_directory/install"
+if [[ "$(cat "$webkit_installed" 2>/dev/null)" != "$webkit_identity" ]]; then
+    rm -rf "$prefix" "$installed_snapshot" "$webkit_installed"
+    cmake -S "$source_directory" -B "$build_directory" -G Ninja "${webkit_options[@]}"
+    cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
+    cmake --install "$build_directory"
+    # The object tree is nine thousand compilations and tens of gigabytes, and
+    # nothing past this point reads it: the bridge compiles against the
+    # installed prefix and the packaging copies out of it. Dropping it here is
+    # what makes the work directory small enough to keep between runs.
+    rm -rf "$build_directory"
+    cp -a "$prefix" "$installed_snapshot"
+    # Written last, so a stamped work directory is one that holds the whole of
+    # this phase's output and not some interrupted part of it.
+    printf '%s\n' "$webkit_identity" > "$webkit_installed"
+fi
+
+# Packaging stages into the prefix: it copies every system library the runtime
+# links into it, rewrites the RPATH of every binary in it and writes the
+# licences and metadata that the smoke run and the archive are then read from.
+# The tree it is handed therefore has to be the installer's own output, which
+# is what the snapshot beside it holds — a second run against a prefix the
+# first one already packaged collides with its own copies. Restoring it to the
+# same path is what keeps it honest: whatever the installer recorded in those
+# binaries still resolves to where it was recorded.
+rm -rf "$prefix"
+cp -a "$installed_snapshot" "$prefix"
 
 bridge_build_directory="$work_directory/bridge-build"
 PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig" \

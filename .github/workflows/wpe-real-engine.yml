@@ -11,10 +11,12 @@ name: WPE Real Engine
 # `browser-runtime-manifest.json` and no `waterui-wpe-2.52.5-linux-*.zip` exists
 # on any release of `water-rs/waterui` or of this repository. What is left is
 # `runtime/build-runtime.sh`, which compiles WPE WebKit from the pinned source
-# tarball — a multi-hour job, hence the timeout below and the cache. The cache
-# is keyed on everything that decides what the artifact contains, so the build
-# runs again only when the pinned version, the packaging, or the C bridge
-# changes.
+# tarball — a multi-hour job, hence the timeout below and the caches. There are
+# two of them because the job has two halves with wildly different costs. The
+# packaged artifact is keyed on everything that decides what it contains, so it
+# is rebuilt whenever the pinned version, the packaging or the C bridge change;
+# WPE WebKit itself is keyed on the pin and the build options alone, so a change
+# to the bridge — seconds of compiling — reuses the hours already spent.
 #
 # Dispatch is the only trigger. `push` and `pull_request` filters would put a
 # multi-hour job on the critical path of every change to these paths, and until
@@ -60,7 +62,9 @@ jobs:
       # `xdg-dbus-proxy` are the host tools the packaged runtime launches its
       # web processes through — `WpeRuntimePaths::validate` insists on both, and
       # `build-runtime.sh` installs them itself, so this step is what a cache
-      # hit needs. GCC 12 is for the WebKit build.
+      # hit needs. GCC 12 is for the WebKit build, and `gdb` is what
+      # `run-smoke.py` reaches for when the smoke dies on a signal: without it
+      # a crash reports a bare status and no stack.
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -68,18 +72,19 @@ jobs:
             libfontconfig1-dev libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev \
             libgdk-pixbuf-2.0-dev libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev \
             libwayland-dev libxkbcommon-dev mesa-vulkan-drivers libvulkan1 \
-            bubblewrap unzip xdg-dbus-proxy gcc-12 g++-12
+            bubblewrap unzip xdg-dbus-proxy gcc-12 g++-12 gdb
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wpe-real-engine
           cache-on-failure: true
 
-      # Keyed on everything that decides what the artifact contains: the pinned
-      # WPE version and the packaging in `runtime/`, and the C bridge in
-      # `native/`. `runtime/source.toml` carries the version the build uses and
-      # `build-runtime.sh` refuses to build when it disagrees with the crate's
-      # `package.metadata.waterui.wpe-runtime` pin, so hashing `runtime/**`
-      # covers the pin as well.
+      # The first half of the split, and the one a hit skips the whole job on:
+      # the packaged artifact, keyed on everything that decides what it
+      # contains — the pinned WPE version and the packaging in `runtime/`, and
+      # the C bridge in `native/`. `runtime/source.toml` carries the version the
+      # build uses and `build-runtime.sh` refuses to build when it disagrees
+      # with the crate's `package.metadata.waterui.wpe-runtime` pin, so hashing
+      # `runtime/**` covers the pin as well.
       - name: Restore the packaged WPE runtime
         id: runtime
         uses: actions/cache@v4
@@ -87,9 +92,46 @@ jobs:
           path: runtime-artifacts
           key: wpe-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}
 
+      # The second, larger half of the split: the unpacked WPE WebKit release
+      # and the prefix it installs into. Compiling it is hours and the C bridge
+      # is seconds, so the two are cached apart — this one is keyed on the pin
+      # and on the script that decides the CMake options, and notably not on
+      # `native/**`, which is what lets a bridge-only change reuse the build.
+      # Restore and save are separate steps because the save has to happen even
+      # when the run fails afterwards: a bridge that does not compile must not
+      # cost the WebKit build a second time.
+      - name: Restore the WPE WebKit build
+        id: webkit
+        if: steps.runtime.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: wpe-work
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
+
+      # The smoke this script ends with has crashed in a way that only happens
+      # at full speed, which is exactly what a debugger perturbs away, so the
+      # kernel is asked to write a core instead: `run-smoke.py` reads
+      # `kernel.core_pattern` to find it and prints the stacks out of it. The
+      # runner's default pattern pipes cores to apport, which leaves nothing on
+      # disk, and the core soft limit is zero.
       - name: Build the WPE runtime from source
         if: steps.runtime.outputs.cache-hit != 'true'
-        run: browser-wpe/runtime/build-runtime.sh runtime-artifacts
+        env:
+          WATERUI_WPE_WORK_DIRECTORY: ${{ github.workspace }}/wpe-work
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
+          ulimit -c unlimited
+          browser-wpe/runtime/build-runtime.sh runtime-artifacts
+
+      # `webkit-build-identity` is written by `build-runtime.sh` once the
+      # install prefix holds a complete build, so this saves the WebKit half
+      # exactly when there is one to save — including after a later step failed.
+      - name: Save the WPE WebKit build
+        if: always() && steps.webkit.outputs.cache-hit != 'true' && hashFiles('wpe-work/webkit-build-identity') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: wpe-work
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
 
       # Unpacking the archive rather than reaching into the build tree is the
       # point: this is the same layout `water package` downloads and stages, so
@@ -102,6 +144,24 @@ jobs:
           unzip -q "$archive" -d wpe-runtime
           echo "WATERUI_WPE_RUNTIME=$GITHUB_WORKSPACE/wpe-runtime" >> "$GITHUB_ENV"
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       # The invocation `ci.yml` cannot satisfy, run where the runtime exists.
+      #
+      # It runs under nextest because WPE WebKit is one runtime per process:
+      # `cargo test` starts every test in a thread of one process, and the
+      # second `WpeRuntime` in a process is refused by the bridge. nextest gives
+      # each test its own process, which is the shape these tests need rather
+      # than a way around the contract. The crash reporter wraps it because a
+      # test binary that dies on a signal takes its output down with it, and
+      # `WATERUI_WPE_CONSOLE` puts each page's own console in the log, so a
+      # bridge script that throws says so instead of timing out in silence.
       - name: Test the WPE surfaces against the real engine
-        run: cargo test -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
+          ulimit -c unlimited
+          WATERUI_WPE_CONSOLE=1 \
+            browser-wpe/runtime/run-with-crash-report.py cargo nextest run \
+              -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke

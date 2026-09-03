@@ -10,6 +10,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import typing
 import zipfile
 
 
@@ -67,7 +68,48 @@ def copy_file(source: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
     return destination
 
 
-def package_owner(path: pathlib.Path) -> str:
+class Dependency(typing.NamedTuple):
+    """A shared library under the name the runtime loads it by, together with
+    the file that name resolves to.
+
+    Both are needed to ask `dpkg` who owns it, and neither answers on its own.
+    `zlib1g` ships `libz.so.1.2.11` and leaves the `libz.so.1` the loader
+    follows to `ldconfig`, so only the resolved file is owned; the SONAME link
+    is owned for `libcom-err2`, and a package is free to ship one, the other or
+    both."""
+
+    loaded: pathlib.Path
+    real: pathlib.Path
+
+
+def merged_usr_alias(path: pathlib.Path) -> pathlib.Path | None:
+    """The same file spelled across the merged-`/usr` symlinks, or `None` when
+    it is not under one.
+
+    `dpkg` answers for the pathnames its packages declared, and the ones that
+    predate the `/usr` merge still declare `/lib/...` for a file that is
+    reached through `/usr/lib/...` — `libcom-err2`, `zlib1g` and `libselinux1`
+    among them, while most of the archive has moved. `pathlib.resolve` walks
+    those symlinks like any other, so a perfectly ordinary lookup arrives at a
+    spelling the database has never heard of. Which directories are merged is
+    read off the filesystem rather than listed here."""
+    parts = path.parts
+    if len(parts) < 3:
+        return None
+    if parts[1] == "usr":
+        directory = pathlib.Path("/", parts[2])
+        alias = pathlib.Path("/", *parts[2:])
+    else:
+        directory = pathlib.Path("/", parts[1])
+        alias = pathlib.Path("/usr", *parts[1:])
+    if not directory.is_symlink():
+        return None
+    if pathlib.Path("/", os.readlink(directory)) != pathlib.Path("/usr", directory.name):
+        return None
+    return alias
+
+
+def dpkg_owner(path: pathlib.Path) -> str | None:
     result = subprocess.run(
         ["dpkg-query", "-S", str(path)],
         check=False,
@@ -76,13 +118,36 @@ def package_owner(path: pathlib.Path) -> str:
         stderr=subprocess.DEVNULL,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"runtime dependency has no Debian package owner: {path}")
+        return None
     return result.stdout.split(":", maxsplit=1)[0].split(",", maxsplit=1)[0]
+
+
+def package_owner(dependency: Dependency) -> str:
+    """The Debian package a runtime dependency came from.
+
+    The loaded name is asked about first, because that is the file the runtime
+    actually opens and the one a package declares when it ships its own SONAME
+    link; the resolved file answers for the packages that let `ldconfig` make
+    that link. Each is also tried under its merged-`/usr` spelling."""
+    candidates: list[pathlib.Path] = []
+    for path in (dependency.loaded, dependency.real):
+        for candidate in (path, merged_usr_alias(path)):
+            if candidate is not None and candidate not in candidates:
+                candidates.append(candidate)
+    for candidate in candidates:
+        owner = dpkg_owner(candidate)
+        if owner is not None:
+            return owner
+    unowned = ", ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(
+        f"runtime dependency {dependency.loaded} has no Debian package owner: "
+        f"dpkg-query -S knows none of {unowned}"
+    )
 
 
 def copy_plugin_packages(
     root: pathlib.Path,
-) -> tuple[list[pathlib.Path], set[pathlib.Path]]:
+) -> tuple[list[pathlib.Path], set[Dependency]]:
     copied = []
     sources = set()
     for package in ("gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good"):
@@ -93,7 +158,7 @@ def copy_plugin_packages(
                 and source.suffix == ".so"
                 and "gstreamer-1.0" in source.parts
             ):
-                sources.add(source.resolve())
+                sources.add(Dependency(source, source.resolve()))
                 copied.append(
                     copy_file(source, root / "lib/gstreamer-1.0" / source.name)
                 )
@@ -102,23 +167,102 @@ def copy_plugin_packages(
     scanner = pathlib.Path(
         f"/usr/lib/{multiarch}/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner"
     )
-    sources.add(scanner.resolve())
+    sources.add(Dependency(scanner, scanner.resolve()))
     copied.append(
         copy_file(scanner, root / "libexec/gstreamer-1.0/gst-plugin-scanner")
     )
     modules = pathlib.Path(f"/usr/lib/{multiarch}/gio/modules")
     for source in sorted(modules.glob("*.so")):
-        sources.add(source.resolve())
+        sources.add(Dependency(source, source.resolve()))
         copied.append(copy_file(source, root / "lib/gio/modules" / source.name))
+    copied += copy_settings_schemas(root)
     return copied, sources
 
 
-def dependency_paths(path: pathlib.Path) -> list[pathlib.Path]:
+def copy_settings_schemas(root: pathlib.Path) -> list[pathlib.Path]:
+    """Stages the GSettings schemas the GIO modules above read.
+
+    Those modules are not optional decoration: the network process loads them,
+    and the ones that consult GSettings — the proxy resolver above all — call
+    `g_settings_new`, which is a `g_error` and therefore fatal when no schema
+    source exists anywhere. A runtime that ships the modules and not their
+    schemas kills its own network process the first time a page is fetched over
+    the network, which is exactly what the real-engine tests saw:
+
+        GLib-GIO-ERROR **: No GSettings schemas are installed on the system
+
+    So the schemas travel with the modules. `XDG_DATA_DIRS` already names the
+    packaged `share` directory — `water_wpe_configure_runtime_paths` sets it —
+    so a compiled source there is the one the runtime finds, whatever the host
+    it is staged on has or has not installed.
+    """
+    staged = root / "share/glib-2.0/schemas"
+    installed = pathlib.Path("/usr/share/glib-2.0/schemas")
+    # `glib-compile-schemas` reads three kinds of file, and a schema is only as
+    # portable as the definitions it refers to: `org.gnome.system.proxy` names
+    # `<enum id='org.gnome.desktop.GDesktopProxyMode'>`, which lives in an
+    # `.enums.xml` beside it. Copying only the schemas left every enum-using
+    # file uncompilable.
+    copied = [
+        copy_file(source, staged / source.name)
+        for pattern in ("*.gschema.xml", "*.enums.xml", "*.gschema.override")
+        for source in sorted(installed.glob(pattern))
+    ]
+    if not copied:
+        raise RuntimeError(
+            f"no GSettings schemas to package: {installed} is empty, so the "
+            "runtime's GIO modules would abort the first time they read one"
+        )
+    # `--strict` because the default is to report a file it cannot compile, skip
+    # it, and exit successfully — which is how a runtime shipped a schema source
+    # with the proxy schema quietly missing from it.
+    run("glib-compile-schemas", "--strict", str(staged))
+    copied.append(staged / "gschemas.compiled")
+    verify_settings_schemas(staged)
+    return copied
+
+
+def verify_settings_schemas(staged: pathlib.Path) -> None:
+    """Fails the build unless the packaged source really carries the schemas.
+
+    The question is about the artifact, not about the machine that built it, so
+    the host's own schemas are taken out of the search path first: `XDG_DATA_DIRS`
+    is pointed at the packaged `share` directory, which is exactly what
+    `water_wpe_configure_runtime_paths` does when the runtime runs.
+    """
+    share = staged.parent.parent
+    listed = subprocess.run(
+        ("gsettings", "--schemadir", str(staged), "list-schemas"),
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        env={
+            **os.environ,
+            "XDG_DATA_DIRS": str(share),
+            "GSETTINGS_SCHEMA_DIR": str(staged),
+        },
+    ).stdout.split()
+    # The proxy resolver is the module that reads GSettings on every network
+    # load, so its schema is the one whose absence kills the network process.
+    missing = [name for name in ("org.gnome.system.proxy",) if name not in listed]
+    if missing:
+        raise RuntimeError(
+            f"the packaged schema source at {staged} is missing "
+            f"{', '.join(missing)}: it carries {len(listed)} schemas, and the "
+            "runtime's network process aborts on the first network load "
+            "without them"
+        )
+
+
+def dependency_paths(path: pathlib.Path) -> list[Dependency]:
+    """Every shared library `path` pulls in, as `lddtree` resolves DT_NEEDED
+    through the `ldconfig` cache — which is the same answer the loader gives
+    the runtime itself, and therefore the name to ask `dpkg` about first."""
     dependencies = []
     for name in run("lddtree", "-l", str(path)).splitlines():
         candidate = pathlib.Path(name)
         if candidate.is_absolute() and candidate.exists():
-            dependencies.append(candidate.resolve())
+            dependencies.append(Dependency(candidate, candidate.resolve()))
     return dependencies
 
 
@@ -130,7 +274,7 @@ def soname(path: pathlib.Path) -> str | None:
 
 def copy_dependency_closure(
     root: pathlib.Path, seeds: list[pathlib.Path]
-) -> tuple[set[pathlib.Path], set[str]]:
+) -> tuple[set[Dependency], set[str]]:
     copied_sources = set()
     system_requirements = set()
     queue = list(seeds)
@@ -138,15 +282,15 @@ def copy_dependency_closure(
     while queue:
         binary = queue.pop()
         for dependency in dependency_paths(binary):
-            if root in dependency.parents:
+            if root in dependency.real.parents:
                 continue
-            name = dependency.name
+            name = dependency.real.name
             if name in SYSTEM_LIBRARIES or name in SYSTEM_GRAPHICS_LIBRARIES:
                 system_requirements.add(name)
                 continue
-            destination = copy_file(dependency, root / "lib" / name)
+            destination = copy_file(dependency.real, root / "lib" / name)
             copied_sources.add(dependency)
-            library_soname = soname(dependency)
+            library_soname = soname(dependency.real)
             if library_soname and library_soname != name:
                 link = root / "lib" / library_soname
                 if link.exists() and link.resolve() != destination.resolve():
@@ -197,7 +341,7 @@ def copy_licenses(
     root: pathlib.Path,
     source: pathlib.Path,
     repository: pathlib.Path,
-    packaged_sources: set[pathlib.Path],
+    packaged_sources: set[Dependency],
 ) -> list[dict[str, object]]:
     license_root = root / "licenses"
     waterui_root = license_root / "waterui"
@@ -218,7 +362,9 @@ def copy_licenses(
         shutil.copy2(license_path, destination)
 
     packages = []
-    for package in sorted({package_owner(path) for path in packaged_sources}):
+    for package in sorted(
+        {package_owner(dependency) for dependency in packaged_sources}
+    ):
         version = run("dpkg-query", "-W", "-f=${Version}", package).strip()
         copyright_file = pathlib.Path(f"/usr/share/doc/{package}/copyright")
         if not copyright_file.is_file():
@@ -339,6 +485,19 @@ def main() -> None:
     bridge = root / "lib/libwaterui_wpe.so"
     if not bridge.is_file():
         raise RuntimeError(f"WPE bridge was not installed at {bridge}")
+    # Packaging stages into the prefix rather than beside it, so the tree it is
+    # given has to be an installer's output and nothing else: run it twice over
+    # the same one and it meets its own copies, whose RPATHs it has already
+    # rewritten, as a `filecmp` mismatch some way into the dependency closure.
+    # The plugin directory `copy_plugin_packages` creates below is the first
+    # thing staging adds and no part of what CMake installs, so finding one
+    # here means this tree has already been through packaging.
+    staged = root / "lib/gstreamer-1.0"
+    if staged.exists():
+        raise RuntimeError(
+            f"{root} has been packaged before ({staged} is staging output, not "
+            "an installed file); package a freshly installed prefix instead"
+        )
     for tool, requirement in SANDBOX_TOOLS.items():
         if not tool.is_file():
             raise RuntimeError(f"WPE sandbox requires {requirement} at {tool}")

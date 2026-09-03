@@ -52,6 +52,7 @@ base64 = "0.22"
 executor-core = { version = "0.7.1", features = ["async-executor"] }
 pollster = "1.0"
 tiny_http = "0.12"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "runtime_smoke"

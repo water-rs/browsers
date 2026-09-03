@@ -9,8 +9,20 @@
 extern "C" {
 #endif
 
-#define WATER_WPE_ABI_VERSION 3
+#define WATER_WPE_ABI_VERSION 4
 #define WATER_WPE_MAX_PLANES 4
+
+/* Which kind of platform buffer a frame carries.
+ *
+ * WPE Platform decides this, not this bridge: a display with a DRM render node
+ * renders into a `WPEBufferDMABuf`, and one without renders into a
+ * `WPEBufferSHM`. Both are ordinary platform buffers — a host with no render
+ * node (a container, a virtual machine, a hosted CI runner) simply produces the
+ * second kind. */
+enum {
+    WATER_WPE_FRAME_DMA_BUF = 0,
+    WATER_WPE_FRAME_SHM = 1
+};
 
 typedef struct WaterWpeRuntime WaterWpeRuntime;
 typedef struct WaterWpePage WaterWpePage;
@@ -22,17 +34,40 @@ typedef struct {
     void (*destroy)(void *user_data);
 } WaterWpeBytes;
 
+/* One frame of page output, tagged by `kind`.
+ *
+ * The fields are grouped so the layout has no padding on either side of the
+ * ABI, and each is documented with the kind it belongs to; a field belonging to
+ * the other kind is zero (`-1` for a descriptor). `token` and `width`/`height`
+ * are common to both.
+ *
+ * `data` points into the buffer the token holds a reference to, and stays valid
+ * until `water_wpe_frame_release` is called for that token. */
 typedef struct {
     void *token;
+    /* SHM: first byte of the top row. */
+    const uint8_t *data;
+    /* SHM: bytes `data` addresses. */
+    size_t len;
+    /* DMA-BUF: DRM format modifier. */
+    uint64_t modifier;
+    /* WATER_WPE_FRAME_DMA_BUF or WATER_WPE_FRAME_SHM. */
+    uint32_t kind;
     uint32_t width;
     uint32_t height;
+    /* DMA-BUF: DRM fourcc. */
     uint32_t format;
-    uint64_t modifier;
+    /* SHM: WPEPixelFormat. */
+    uint32_t pixel_format;
+    /* SHM: bytes between adjacent rows. */
+    uint32_t stride;
+    /* DMA-BUF: planes described by the three arrays below. */
     uint32_t n_planes;
+    /* DMA-BUF: the buffer's rendering fence, or -1 when it has none. */
+    int rendering_fence_fd;
     int fds[WATER_WPE_MAX_PLANES];
     uint32_t offsets[WATER_WPE_MAX_PLANES];
     uint32_t strides[WATER_WPE_MAX_PLANES];
-    int rendering_fence_fd;
 } WaterWpeFrame;
 
 typedef void (*WaterWpeDestroyNotify)(void *user_data);

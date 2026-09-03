@@ -2,9 +2,18 @@
 
 import argparse
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import time
+
+import crash_report
+
+# Stopping at the GLib critical rather than at whatever it later corrupts is the
+# difference between a stack that names a defect and a bare `-11`: a critical
+# from the runtime is a defect either way, so the smoke does not let one pass.
+SMOKE_G_DEBUG = "fatal-criticals"
 
 
 def process_tree(root: int) -> set[int]:
@@ -42,6 +51,50 @@ def directory_bytes(root: pathlib.Path) -> int:
     )
 
 
+def smoke_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.setdefault("G_DEBUG", SMOKE_G_DEBUG)
+    return environment
+
+
+def report_crash(command: list[str], environment: dict[str, str], started: float) -> None:
+    """Prints the stacks of the smoke that just died.
+
+    The core is the first choice, because it is the crash that actually
+    happened: it records the run that was not being watched. Running the smoke
+    again under gdb is the fallback for when no core was written, and it is a
+    weaker one — a race that only loses at full speed can win under a debugger,
+    and then the rerun exits cleanly and says nothing.
+    """
+    if crash_report.cores_since(started):
+        crash_report.report_since(started)
+        return
+    debugger = shutil.which("gdb")
+    if debugger is None:
+        print("no gdb on PATH: the smoke crash has no stack to report", flush=True)
+        return
+    print(
+        "the smoke died on a signal and left no core; running it again under gdb, "
+        "which may not reproduce a race",
+        flush=True,
+    )
+    subprocess.run(
+        [
+            debugger,
+            "-batch",
+            "-nx",
+            "-ex",
+            "run",
+            "-ex",
+            "thread apply all bt full",
+            "--args",
+            *command,
+        ],
+        env=environment,
+        check=False,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", required=True, type=pathlib.Path)
@@ -54,13 +107,17 @@ def main() -> None:
 
     identity = json.loads((arguments.runtime / "runtime.json").read_text())
     started = time.monotonic_ns()
+    # `crash_report` finds cores by modification time, which is wall clock.
+    crashes_after = time.time()
+    command = [
+        str(arguments.binary),
+        str(arguments.runtime),
+        str(arguments.snapshot),
+        str(arguments.timeout_seconds),
+    ]
+    environment = smoke_environment()
     process = subprocess.Popen(
-        [
-            str(arguments.binary),
-            str(arguments.runtime),
-            str(arguments.snapshot),
-            str(arguments.timeout_seconds),
-        ]
+        command, env=environment, preexec_fn=crash_report.allow_core_dumps
     )
     peak_resident_bytes = 0
     peak_process_count = 0
@@ -76,6 +133,8 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             pass
     if process.returncode != 0:
+        if process.returncode < 0:
+            report_crash(command, environment, crashes_after)
         raise RuntimeError(
             f"WPE runtime smoke process exited with {process.returncode}"
         )
