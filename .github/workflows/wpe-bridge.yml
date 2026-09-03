@@ -81,10 +81,10 @@ jobs:
           prefix="wpe-runtime-$version-${{ runner.os }}-${{ runner.arch }}-"
           exact="${prefix}${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}.zip"
           # shellcheck disable=SC2016 # `$exact` and `$prefix` are jq's, bound by --arg
-          asset="$(gh release view wpe-runtime --json assets \
-            --jq --arg exact "$exact" --arg prefix "$prefix" \
-            '(.assets | map(select(.name == $exact))) + (.assets | map(select(.name | startswith($prefix))) | sort_by(.updatedAt) | reverse) | .[0].name // empty' \
-            2>/dev/null || true)"
+          asset="$(gh release view wpe-runtime --json assets 2>/dev/null \
+            | jq -r --arg exact "$exact" --arg prefix "$prefix" \
+              '(.assets | map(select(.name == $exact))) + (.assets | map(select(.name | startswith($prefix))) | sort_by(.updatedAt) | reverse) | .[0].name // empty' \
+            || true)"
           if [[ -z "$asset" ]]; then
             echo "::error::The wpe-runtime release holds no ${prefix}*.zip, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and publishes the runtime, and every later run of this job downloads it in seconds."
             exit 1
