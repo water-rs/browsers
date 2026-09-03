@@ -878,7 +878,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2032,7 +2032,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "rustc-hash 1.1.0",
- "spirv",
  "thiserror",
  "unicode-ident",
 ]
@@ -2608,7 +2607,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2743,11 +2742,11 @@ dependencies = [
 
 [[package]]
 name = "shaderloom"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f86322d7fb2cf630579baf1a3335c46188ad305fe09f276393396ebb74cf060"
+checksum = "abfe38a4a8d473f595240dd001b51c5778b30ee439a0c5f4960554a977bcba93"
 dependencies = [
- "naga 30.0.1",
+ "naga 29.0.4",
  "wgpu",
 ]
 
@@ -3502,7 +3501,7 @@ dependencies = [
 [[package]]
 name = "waterui-chromium"
 version = "0.1.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "async-channel",
  "chromiumoxide_cdp",
@@ -3519,7 +3518,7 @@ dependencies = [
 [[package]]
 name = "waterui-core"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "anyhow",
  "nami",
@@ -3531,7 +3530,7 @@ dependencies = [
 [[package]]
 name = "waterui-graphics"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "bytemuck",
  "encase",
@@ -3554,6 +3553,7 @@ dependencies = [
  "shaderloom",
  "tracing",
  "vello",
+ "vello_common",
  "vello_hybrid",
  "waterui-core",
  "wgpu",
@@ -3562,7 +3562,7 @@ dependencies = [
 [[package]]
 name = "waterui-layout"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "nami",
  "num-traits",
@@ -3573,7 +3573,7 @@ dependencies = [
 [[package]]
 name = "waterui-macros"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "icu_locale_core",
  "icu_locid",
@@ -3588,7 +3588,7 @@ dependencies = [
 [[package]]
 name = "waterui-str"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "nami-core",
  "serde",
@@ -3597,7 +3597,7 @@ dependencies = [
 [[package]]
 name = "waterui-url"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "base64 0.22.1",
  "nami-core",
@@ -3605,9 +3605,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "waterui-watcher-set"
+version = "0.1.0"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
+
+[[package]]
 name = "waterui-webview"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/waterui.git?branch=dev#d3f24678583ee46e732f36b7948ae55ccf85a650"
+source = "git+https://github.com/water-rs/waterui.git?branch=dev#b845d49a9c0a0a97f2a7feddac85e275dde02f79"
 dependencies = [
  "base64 0.22.1",
  "cookie",
@@ -3620,6 +3625,7 @@ dependencies = [
  "waterui-layout",
  "waterui-str",
  "waterui-url",
+ "waterui-watcher-set",
 ]
 
 [[package]]
@@ -3933,7 +3939,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
