@@ -39,6 +39,7 @@ waterui-url = { version = "0.3.0", git = "https://github.com/water-rs/waterui.gi
 waterui-webview = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
 futures-timer = "3"
 keycode = { version = "1.0", optional = true }
 kurbo = "0.13"
@@ -53,6 +54,13 @@ executor-core = { version = "0.7.1", features = ["async-executor"] }
 pollster = "1.0"
 tiny_http = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The blit pipeline's uniform block is declared in both `src/wpe_blit.wgsl` and
+# `src/gpu.rs`, and only a GPU compares them at run time. `naga` is how the test
+# beside the shader compares them on any host — pinned to the version `wgpu`
+# parses the shader with, so the reflection answers for the same front end.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+naga = { version = "29.0.4", features = ["wgsl-in"] }
 
 [[example]]
 name = "runtime_smoke"

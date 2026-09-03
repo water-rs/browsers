@@ -1,1 +1,4 @@
 /target
+# Python writes one beside `browser-wpe/runtime/*.py` whenever one of those
+# scripts is imported rather than run, which is how they are inspected.
+browser-wpe/runtime/__pycache__/

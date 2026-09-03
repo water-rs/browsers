@@ -1,0 +1,145 @@
+name: WPE Bridge
+
+# `browser-wpe/native/waterui_wpe.c` is the only part of this repository that no
+# ordinary check compiles: `ci.yml` builds the Rust crate, and the C bridge is
+# built by `runtime/build-runtime.sh`, which `wpe-real-engine.yml` runs behind a
+# manual dispatch that takes minutes with the WebKit cache warm and hours
+# without. Every bridge typo therefore cost a dispatch, and four defects were
+# found one dispatch at a time while landing water-rs/browsers#26 — each one
+# hidden behind the previous.
+#
+# This job compiles the bridge on a pull request in minutes, against a runtime
+# that dispatch already published. It builds nothing itself: the WPE runtime is
+# whatever the last real-engine run packaged, downloaded from the `wpe-runtime`
+# prerelease that workflow uploads to (#31). It is not a substitute for that
+# workflow — nothing here runs the engine — it is the compiler pass, moved off
+# the dispatch and onto the change.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: ["**"]
+    paths:
+      - browser-wpe/native/**
+      - browser-wpe/runtime/**
+      - .github/workflows/wpe-bridge.yml
+
+concurrency:
+  group: wpe-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge:
+    name: Compile the C bridge
+    # The same provisioning the packaged runtime is built on, and not a choice:
+    # the prefix restored below holds headers and libraries produced by
+    # `wpe-real-engine.yml` on `ubuntu-22.04` with GCC 12, which
+    # `runtime/source.toml` pins through `maximum_glibc` and `minimum_gcc`.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      CC: gcc-12
+      CXX: g++-12
+    steps:
+      - uses: actions/checkout@v4
+
+      # `native/CMakeLists.txt` asks pkg-config for five modules. Two of them —
+      # `wpe-webkit-2.0` and `wpe-platform-2.0` — come from the restored prefix;
+      # the other three are the host's, as they are when `build-runtime.sh`
+      # compiles the bridge after `Tools/wpe/install-dependencies` has run. WPE
+      # WebKit's own `Requires:` adds `glib-2.0` and `libsoup-3.0`, which
+      # `libglib2.0-dev` and `libsoup-3.0-dev` answer for.
+      - name: Install the bridge's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config gcc-12 g++-12 unzip \
+            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libdrm-dev
+
+      # The packaged runtime `wpe-real-engine.yml` publishes, under that
+      # workflow's own naming: `wpe-runtime-<version>-<os>-<arch>-<hash>.zip`,
+      # where the hash covers `runtime/**` and `native/**`. The prefix inside
+      # it does not depend on `native/**` — the bridge is a single shared
+      # object beside WebKit's, and nothing here reads it — while the hash
+      # does, so a pull request that touches the bridge (which is every pull
+      # request this job exists for) misses the exact name by construction.
+      # The exact asset is taken when it exists, and otherwise the newest one
+      # for the pinned version on this platform: any packaging of that release
+      # holds the headers and libraries the bridge compiles against.
+      #
+      # Skipping when none exists would leave a green check over a bridge
+      # nobody compiled, which is the state this job exists to end.
+      - name: Download the published WPE runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+          test -n "$version"
+          prefix="wpe-runtime-$version-${{ runner.os }}-${{ runner.arch }}-"
+          exact="${prefix}${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}.zip"
+          # shellcheck disable=SC2016 # `$exact` and `$prefix` are jq's, bound by --arg
+          asset="$(gh release view wpe-runtime --json assets 2>/dev/null \
+            | jq -r --arg exact "$exact" --arg prefix "$prefix" \
+              '(.assets | map(select(.name == $exact))) + (.assets | map(select(.name | startswith($prefix))) | sort_by(.updatedAt) | reverse) | .[0].name // empty' \
+            || true)"
+          if [[ -z "$asset" ]]; then
+            echo "::error::The wpe-runtime release holds no ${prefix}*.zip, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and publishes the runtime, and every later run of this job downloads it in seconds."
+            exit 1
+          fi
+          mkdir -p runtime-artifacts
+          gh release download wpe-runtime --pattern "$asset" --dir runtime-artifacts
+
+      # WebKit writes its pkg-config files with `libdir=@LIB_INSTALL_DIR@`, and
+      # `Source/cmake/OptionsWPE.cmake` sets that to `CMAKE_INSTALL_FULL_LIBDIR`
+      # — an absolute path — so an installed prefix is not relocatable and
+      # unpacking it anywhere else yields `-L` flags pointing at nothing. Rather
+      # than name where `wpe-real-engine.yml` happened to build it, the archive
+      # is asked: `prefix=` in the same file records it, and the tree goes back
+      # there.
+      - name: Stage the packaged runtime at the prefix it was built at
+        shell: bash
+        run: |
+          archive="$(echo runtime-artifacts/*.zip)"
+          test -f "$archive"
+          unzip -q "$archive" -d staged-runtime
+          descriptor=staged-runtime/lib/pkgconfig/wpe-webkit-2.0.pc
+          test -f "$descriptor"
+          prefix="$(sed -n 's/^prefix=//p' "$descriptor")"
+          if [[ -z "$prefix" ]]; then
+              echo "::error::$archive carries no pkg-config prefix, so the bridge cannot be compiled against it"
+              exit 1
+          fi
+          mkdir -p "$(dirname "$prefix")"
+          rm -rf "$prefix"
+          mv staged-runtime "$prefix"
+          # The asset name carries the pin, and this is the archive's own word
+          # on it — `runtime.json` is what `package-runtime.py` recorded the
+          # archive as being. Compiling the bridge against the wrong WPE API
+          # would answer a question nobody asked.
+          pinned="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+          packaged="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$prefix/runtime.json")"
+          if [[ "$pinned" != "$packaged" ]]; then
+              echo "::error::The published WPE runtime is $packaged and browser-wpe/runtime/source.toml pins $pinned. Run the 'WPE Real Engine' workflow once to build and publish a runtime for the current pin."
+              exit 1
+          fi
+          echo "WATERUI_WPE_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      # The same configuration `build-runtime.sh` gives the bridge, against the
+      # same `native/CMakeLists.txt`. The warning flags are not repeated here:
+      # `-Wall -Wextra -Werror -Wpedantic` live in that one file, so this job
+      # and the runtime build cannot drift apart.
+      - name: Build the C bridge
+        run: |
+          PKG_CONFIG_PATH="$WATERUI_WPE_PREFIX/lib/pkgconfig:$WATERUI_WPE_PREFIX/share/pkgconfig" \
+          cmake \
+            -S browser-wpe/native \
+            -B bridge-build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_PREFIX_PATH="$WATERUI_WPE_PREFIX"
+          cmake --build bridge-build

@@ -1,4 +1,6 @@
+use bytemuck::{Pod, Zeroable};
 use num_traits::ToPrimitive as _;
+use std::num::NonZeroU64;
 use std::rc::Rc;
 use waterui_graphics::gpu_surface::{GpuContext, GpuFrame, GpuView};
 use wgpu_external_frame::dma_buf::{DmaBufFrame, DmaBufImporter};
@@ -8,6 +10,36 @@ use crate::WpePage;
 use crate::frame::{BrowserFrame, ShmFrame};
 #[cfg(feature = "webview")]
 use crate::input::{WpeInputGpuView, WpeSurfaceInput};
+
+/// The uniform block the blit pipeline binds at `@group(0) @binding(2)`.
+///
+/// It is declared twice — here and in `wpe_blit.wgsl` — and nothing at run
+/// time compares the two: wgpu validates the bound buffer against the pipeline
+/// layout, and the pipeline layout is written from this side, so a shader whose
+/// block is a different size is accepted and the fragment stage reads whichever
+/// bytes happen to sit at its own offsets. That is how a 32-byte shader block
+/// against a 16-byte host one survived long enough to need a GPU to notice
+/// (water-rs/browsers#26), so the test at the bottom of this module reflects
+/// the shader and asserts the two still agree.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FrameOptions {
+    force_opaque: u32,
+    /// WGSL rounds a uniform struct up to a multiple of 16 bytes. The shader
+    /// spells that tail out as three scalars rather than a `vec3<u32>`,
+    /// because a `vec3` is itself 16-byte aligned and would push the block to
+    /// 32; this is the same tail on the host side.
+    _padding: [u32; 3],
+}
+
+impl FrameOptions {
+    /// The size the uniform buffer is allocated with and the pipeline layout
+    /// declares as the binding's minimum.
+    const SIZE: NonZeroU64 = match NonZeroU64::new(size_of::<Self>() as u64) {
+        Some(size) => size,
+        None => panic!("the blit's uniform block has fields"),
+    };
+}
 
 struct SourceTexture {
     size: (u32, u32),
@@ -281,10 +313,11 @@ fn create_source_bind_group(
         .source
         .as_ref()
         .expect("WPE source texture must exist after allocation");
-    let force_opaque = u32::from(force_opaque);
-    let mut options = [0u8; 16];
-    options[..4].copy_from_slice(&force_opaque.to_ne_bytes());
-    queue.write_buffer(&gpu.options, 0, &options);
+    let options = FrameOptions {
+        force_opaque: u32::from(force_opaque),
+        _padding: [0; 3],
+    };
+    queue.write_buffer(&gpu.options, 0, bytemuck::bytes_of(&options));
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("waterui_wpe_bind_group"),
         layout: &gpu.bind_group_layout,
@@ -365,10 +398,7 @@ fn create_gpu_state(context: &GpuContext<'_>) -> GpuState {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: Some(
-                                std::num::NonZeroU64::new(16)
-                                    .expect("WPE options size is non-zero"),
-                            ),
+                            min_binding_size: Some(FrameOptions::SIZE),
                         },
                         count: None,
                     },
@@ -421,7 +451,7 @@ fn create_gpu_state(context: &GpuContext<'_>) -> GpuState {
         }),
         options: context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("waterui_wpe_options"),
-            size: 16,
+            size: FrameOptions::SIZE.get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }),
@@ -491,4 +521,62 @@ fn clear_target(frame: &GpuFrame<'_>) {
         });
     }
     frame.queue.submit([encoder.finish()]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameOptions;
+    use naga::{AddressSpace, ResourceBinding, TypeInner};
+
+    /// The pipeline's uniform block, as the shader declares it.
+    ///
+    /// wgpu is not an oracle for this: it checks the bound buffer against the
+    /// pipeline layout, which [`super::create_gpu_state`] writes from
+    /// [`FrameOptions`], so a shader that disagrees with both is accepted and
+    /// only a real draw on a real device shows it. Reflecting the WGSL with the
+    /// same front end wgpu parses it with asks the question the run-time check
+    /// cannot, and needs no adapter to answer it.
+    #[test]
+    fn shader_uniform_block_matches_the_host_struct() {
+        let module = naga::front::wgsl::parse_str(include_str!("wpe_blit.wgsl"))
+            .expect("the blit shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("the blit shader validates");
+
+        let options = module
+            .global_variables
+            .iter()
+            .map(|(_, variable)| variable)
+            .find(|variable| {
+                variable.space == AddressSpace::Uniform
+                    && variable.binding
+                        == Some(ResourceBinding {
+                            group: 0,
+                            binding: 2,
+                        })
+            })
+            .expect("the blit shader binds a uniform block at group 0 binding 2");
+        let TypeInner::Struct { members, span } = &module.types[options.ty].inner else {
+            panic!("the blit shader's uniform block is a struct");
+        };
+
+        assert_eq!(
+            u64::from(*span),
+            FrameOptions::SIZE.get(),
+            "the shader's uniform block and FrameOptions are different sizes"
+        );
+        let force_opaque = members
+            .iter()
+            .find(|member| member.name.as_deref() == Some("force_opaque"))
+            .expect("the blit shader's uniform block has a force_opaque member");
+        assert_eq!(
+            u64::from(force_opaque.offset),
+            core::mem::offset_of!(FrameOptions, force_opaque) as u64,
+            "force_opaque sits at a different offset in the shader than in FrameOptions"
+        );
+    }
 }

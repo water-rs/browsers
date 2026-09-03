@@ -3473,6 +3473,7 @@ name = "waterui-browser-wpe"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytemuck",
  "cookie",
  "executor-core",
  "futures",
@@ -3480,6 +3481,7 @@ dependencies = [
  "keycode",
  "kurbo",
  "libloading 0.9.0",
+ "naga 29.0.4",
  "nami",
  "num-traits",
  "pollster",
