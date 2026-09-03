@@ -1329,11 +1329,13 @@ void water_wpe_page_get_cookies(
         async);
 }
 
-/* One text form for every JavaScript result, matching the GTK and CEF backends:
- * a string comes back bare, anything else as JSON. `jsc_value_to_json` quotes a
- * string, which is why WPE alone used to report `"WaterUI"` where the others
- * reported `WaterUI`. */
-static char *water_wpe_value_to_text(JSCValue *value)
+/* The typed path's answer is already text.
+ *
+ * `__wateruiEval` in the shared `js/eval.js` returns `JSON.stringify(...)`, so
+ * the value of an awaited call is a JavaScript string holding the envelope.
+ * It crosses as it is: encoding it again would hand the caller a JSON string
+ * containing JSON, and every typed evaluation would fail to decode. */
+static char *water_wpe_value_to_envelope(JSCValue *value)
 {
     if (jsc_value_is_string(value))
         return jsc_value_to_string(value);
@@ -1343,13 +1345,32 @@ static char *water_wpe_value_to_text(JSCValue *value)
     return json ? json : jsc_value_to_string(value);
 }
 
+/* The raw path answers with the JSON encoding of the value.
+ *
+ * A string therefore arrives quoted and an object arrives as an object, which
+ * is what makes the answer parseable at all: unquoted, `location.href` and a
+ * page that returned the six characters `"first"` are the same nine bytes.
+ *
+ * JSON has no `undefined`, and neither has this path: it reports one as `null`,
+ * as `JSON.stringify` does for a value it cannot represent. A caller that needs
+ * `undefined` and `null` apart uses the typed path, whose envelope leaves the
+ * key absent instead — which is exactly why that path exists. */
+static char *water_wpe_value_to_json(JSCValue *value)
+{
+    if (jsc_value_is_undefined(value))
+        return g_strdup("null");
+    char *json = jsc_value_to_json(value, 0);
+    return json ? json : g_strdup("null");
+}
+
 /* Reports one finished evaluation and consumes `async`, `value` and `error`.
  * Exactly one of `value` and `error` is set, as GLib's async convention
  * requires. */
 static void water_wpe_javascript_complete(
     WaterWpeAsyncResult *async,
     JSCValue *value,
-    GError *error)
+    GError *error,
+    char *(*to_text)(JSCValue *))
 {
     if (!value) {
         g_assert(error != NULL);
@@ -1362,7 +1383,7 @@ static void water_wpe_javascript_complete(
         g_free(async);
         return;
     }
-    char *text = water_wpe_value_to_text(value);
+    char *text = to_text(value);
     async->callback(async->user_data, true, text, strlen(text));
     g_free(text);
     g_object_unref(value);
@@ -1379,7 +1400,7 @@ static void water_wpe_javascript_ready(
         WEBKIT_WEB_VIEW(object),
         result,
         &error);
-    water_wpe_javascript_complete(user_data, value, error);
+    water_wpe_javascript_complete(user_data, value, error, water_wpe_value_to_json);
 }
 
 static void water_wpe_async_javascript_ready(
@@ -1392,7 +1413,7 @@ static void water_wpe_async_javascript_ready(
         WEBKIT_WEB_VIEW(object),
         result,
         &error);
-    water_wpe_javascript_complete(user_data, value, error);
+    water_wpe_javascript_complete(user_data, value, error, water_wpe_value_to_envelope);
 }
 
 void water_wpe_page_run_javascript(

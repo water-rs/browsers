@@ -430,6 +430,49 @@ fn navigation_reaches_each_url_and_history_moves_both_ways() {
     assert!(!engine.handle.can_go_forward());
 }
 
+/// The raw evaluation path answers with the JSON encoding of the value.
+///
+/// Unquoted, an answer is not parseable: `location.href` and a page that
+/// returned the six characters `"first"` are the same nine bytes, and the
+/// fixture's own `location` reader has to guess which it got. The engine's
+/// `jsc_value_to_json` is what encodes it, so a string arrives quoted and an
+/// object arrives as an object.
+#[test]
+fn the_raw_evaluation_path_answers_with_json() {
+    let engine = RealEngine::start();
+    engine.open("/first");
+
+    let string = engine
+        .block_on(engine.handle.run_javascript("'waterui'"))
+        .expect("a string literal evaluates");
+    assert_eq!(
+        string.as_str(),
+        "\"waterui\"",
+        "a string result arrives as JSON, quoted"
+    );
+
+    let object = engine
+        .block_on(
+            engine
+                .handle
+                .run_javascript("({name: 'waterui', ok: true})"),
+        )
+        .expect("an object literal evaluates");
+    let decoded: Value = serde_json::from_str(&object)
+        .unwrap_or_else(|error| panic!("run_javascript answered `{object}`, not JSON: {error}"));
+    assert_eq!(text(&decoded, "name"), "waterui");
+    assert_eq!(field(&decoded, "ok"), &Value::Bool(true));
+
+    let nothing = engine
+        .block_on(engine.handle.run_javascript("undefined"))
+        .expect("undefined evaluates");
+    assert_eq!(
+        nothing.as_str(),
+        "null",
+        "JSON has no undefined; the typed path is where it stays distinct"
+    );
+}
+
 /// The reply a handler returns has to arrive as the value it returned.
 ///
 /// Every reply once crossed as base64, because the bridge had collapsed a
