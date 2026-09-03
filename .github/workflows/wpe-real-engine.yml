@@ -198,12 +198,28 @@ jobs:
       # the checks run against what an application actually ships with. The
       # archive is `waterui-wpe-*.zip` when it was built here and the asset name
       # when it was downloaded, hence the wider glob.
+      #
+      # The prefix the runtime was built at has to be gone as well. WebKit
+      # compiles its libexec directory into the library and consults the
+      # bridge's `WEBKIT_EXEC_PATH` only because `build-runtime.sh` builds in
+      # developer mode; with the build tree still on disk the compiled-in path
+      # resolves, and a runtime that could not be relocated at all passed every
+      # earlier run of this job. The archive records the prefix in its
+      # pkg-config file, so it is read from there rather than assumed.
       - name: Stage the packaged runtime
         shell: bash
         run: |
           archive="$(echo runtime-artifacts/*.zip)"
           test -f "$archive"
           unzip -q "$archive" -d wpe-runtime
+          built_at="$(sed -n 's/^prefix=//p' wpe-runtime/lib/pkgconfig/wpe-webkit-2.0.pc)"
+          case "$built_at" in
+            "$GITHUB_WORKSPACE"/*) rm -rf "$built_at" ;;
+            *)
+              echo "::error::$archive was built at '$built_at', outside this workspace, so the relocation check cannot remove it"
+              exit 1
+              ;;
+          esac
           echo "WATERUI_WPE_RUNTIME=$GITHUB_WORKSPACE/wpe-runtime" >> "$GITHUB_ENV"
 
       - uses: taiki-e/install-action@v2

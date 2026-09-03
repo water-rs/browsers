@@ -472,6 +472,11 @@ static void water_wpe_configure_runtime_paths(void)
     char *plugin_scanner =
         g_build_filename(root, "libexec", "gstreamer-1.0", "gst-plugin-scanner", NULL);
     char *gio_modules = g_build_filename(root, "lib", "gio", "modules", NULL);
+    /* WebKit reads WEBKIT_EXEC_PATH only in a DEVELOPER_MODE build; otherwise
+     * it spawns its helper processes from the libexec directory compiled into
+     * the library, which is the prefix the runtime was built at and never the
+     * one it was unpacked into. runtime/build-runtime.sh turns that mode on for
+     * exactly this line. */
     g_setenv("WEBKIT_EXEC_PATH", exec_path, TRUE);
     g_setenv("WEBKIT_INJECTED_BUNDLE_PATH", bundle_path, TRUE);
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path, TRUE);
