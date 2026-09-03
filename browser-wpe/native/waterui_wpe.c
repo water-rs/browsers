@@ -479,6 +479,15 @@ static void water_wpe_configure_runtime_paths(void)
      * exactly this line. */
     g_setenv("WEBKIT_EXEC_PATH", exec_path, TRUE);
     g_setenv("WEBKIT_INJECTED_BUNDLE_PATH", bundle_path, TRUE);
+    /* The helper processes run inside WebKit's bubblewrap sandbox, which
+     * bind-mounts the system library directories, the prefix compiled into the
+     * library (gone once the runtime is unpacked somewhere else) and, in a
+     * DEVELOPER_MODE build, the parent of WEBKIT_EXEC_PATH -- that is `libexec`,
+     * not the runtime root. A WPEWebProcess spawned from a relocated runtime
+     * therefore cannot see `lib`, and its `$ORIGIN/../../lib` RPATH fails on
+     * libWPEWebKit itself. Mounting the runtime root read-only is the API for
+     * exactly this: a web context set up before its first process is spawned. */
+    webkit_web_context_add_path_to_sandbox(webkit_web_context_get_default(), root, TRUE);
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path, TRUE);
     g_setenv("GST_PLUGIN_SCANNER_1_0", plugin_scanner, TRUE);
     g_setenv("GIO_EXTRA_MODULES", gio_modules, TRUE);
