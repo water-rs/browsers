@@ -25,9 +25,21 @@ name: WPE Real Engine
 # keeps the runtime cache from being evicted for inactivity, which would put the
 # next run back on the multi-hour path — in the same change that makes the build
 # succeed.
+#
+# The packaged runtime itself is not left to `actions/cache`. The repository's
+# cache quota is spent on `Swatinem/rust-cache` entries of two to three
+# gigabytes a job, and the runtime entry was the first evicted — gone within
+# hours of being saved, which turned the next dispatch into a rebuild of WebKit
+# with nothing under `runtime/` changed. A successful build therefore uploads
+# the archive to the `wpe-runtime` prerelease, named for the pin and the
+# packaging hash, and every run — this one and the bridge fast lane — asks that
+# release first. The WebKit build tree stays a cache entry: it is only needed
+# to package a runtime that does not exist yet.
 
+# `contents: write` is for publishing the packaged runtime as a release asset
+# (below); nothing here pushes a commit or a tag of its own.
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_dispatch:
@@ -78,15 +90,43 @@ jobs:
           shared-key: wpe-real-engine
           cache-on-failure: true
 
+      # The identity of a packaged runtime: the pinned WPE version, and a hash
+      # of everything that decides what the archive contains — the packaging in
+      # `runtime/` and the C bridge in `native/`. `runtime/source.toml` carries
+      # the version the build uses and `build-runtime.sh` refuses to build when
+      # it disagrees with the crate's `package.metadata.waterui.wpe-runtime`
+      # pin, so hashing `runtime/**` covers the pin as well. The version leads
+      # the name so that a consumer that can live with any packaging of the
+      # pinned release — the bridge fast lane — can ask for the prefix.
+      - name: Name the packaged runtime
+        id: identity
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+          test -n "$version"
+          echo "asset=wpe-runtime-$version-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}.zip" >> "$GITHUB_OUTPUT"
+
+      # The durable copy: a runtime with this exact identity, published by an
+      # earlier run. A hit skips the build and the caches alike.
+      - name: Download the published WPE runtime
+        id: published
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p runtime-artifacts
+          if gh release download wpe-runtime --pattern '${{ steps.identity.outputs.asset }}' --dir runtime-artifacts 2>/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # The first half of the split, and the one a hit skips the whole job on:
-      # the packaged artifact, keyed on everything that decides what it
-      # contains — the pinned WPE version and the packaging in `runtime/`, and
-      # the C bridge in `native/`. `runtime/source.toml` carries the version the
-      # build uses and `build-runtime.sh` refuses to build when it disagrees
-      # with the crate's `package.metadata.waterui.wpe-runtime` pin, so hashing
-      # `runtime/**` covers the pin as well.
+      # the packaged artifact, under the same identity as the release asset,
+      # for a runtime built on this branch that has not been published yet.
       - name: Restore the packaged WPE runtime
         id: runtime
+        if: steps.published.outputs.found != 'true'
         uses: actions/cache@v4
         with:
           path: runtime-artifacts
@@ -102,7 +142,7 @@ jobs:
       # cost the WebKit build a second time.
       - name: Restore the WPE WebKit build
         id: webkit
-        if: steps.runtime.outputs.cache-hit != 'true'
+        if: steps.published.outputs.found != 'true' && steps.runtime.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v4
         with:
           path: wpe-work
@@ -115,7 +155,7 @@ jobs:
       # runner's default pattern pipes cores to apport, which leaves nothing on
       # disk, and the core soft limit is zero.
       - name: Build the WPE runtime from source
-        if: steps.runtime.outputs.cache-hit != 'true'
+        if: steps.published.outputs.found != 'true' && steps.runtime.outputs.cache-hit != 'true'
         env:
           WATERUI_WPE_WORK_DIRECTORY: ${{ github.workspace }}/wpe-work
         run: |
@@ -133,13 +173,35 @@ jobs:
           path: wpe-work
           key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
 
+      # The durable copy, written. One prerelease holds every packaged runtime,
+      # each asset named for its identity, so a later run — on any branch —
+      # downloads it instead of rebuilding, and the cache quota has nothing to
+      # say about it. The archive's own name is the one `water package` knows;
+      # the asset name is the identity, so the file is copied under it.
+      - name: Publish the packaged WPE runtime
+        if: steps.published.outputs.found != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$(echo runtime-artifacts/waterui-wpe-*.zip)"
+          test -f "$archive"
+          cp "$archive" '${{ steps.identity.outputs.asset }}'
+          if ! gh release view wpe-runtime >/dev/null 2>&1; then
+            gh release create wpe-runtime --prerelease --title 'WPE runtime builds' \
+              --notes 'Packaged WPE WebKit runtimes built by the WPE Real Engine workflow, one asset per pinned version and packaging hash. Consumed by CI; not a release of the crates.'
+          fi
+          gh release upload wpe-runtime '${{ steps.identity.outputs.asset }}' --clobber
+
       # Unpacking the archive rather than reaching into the build tree is the
       # point: this is the same layout `water package` downloads and stages, so
-      # the checks run against what an application actually ships with.
+      # the checks run against what an application actually ships with. The
+      # archive is `waterui-wpe-*.zip` when it was built here and the asset name
+      # when it was downloaded, hence the wider glob.
       - name: Stage the packaged runtime
         shell: bash
         run: |
-          archive="$(echo runtime-artifacts/waterui-wpe-*.zip)"
+          archive="$(echo runtime-artifacts/*.zip)"
           test -f "$archive"
           unzip -q "$archive" -d wpe-runtime
           echo "WATERUI_WPE_RUNTIME=$GITHUB_WORKSPACE/wpe-runtime" >> "$GITHUB_ENV"
