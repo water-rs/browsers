@@ -101,6 +101,7 @@ use waterui_browser_cef::{
 };
 use waterui_core::{Environment, View as _, view::Hook};
 use waterui_url::Url;
+use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
     ScriptMessageHandler, WatcherGuard, WebView, WebViewController, WebViewEvent,
@@ -356,7 +357,7 @@ impl<'a> Page<'a> {
             .expect("the engine evaluates a string literal");
         assert_eq!(
             evaluated.as_str(),
-            "installed",
+            "\"installed\"",
             "the engine answered a trivial evaluation with something else"
         );
     }
@@ -444,9 +445,11 @@ impl<'a> Page<'a> {
 
     /// What the engine says the current document's URL is.
     fn location(&self) -> String {
-        self.block_on(self.webview.run_javascript("location.href"))
-            .expect("location.href evaluates")
-            .to_string()
+        let json = self
+            .block_on(self.webview.run_javascript("location.href"))
+            .expect("location.href evaluates");
+        serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("run_javascript answered `{json}`, not JSON: {error}"))
     }
 }
 
@@ -637,13 +640,30 @@ fn the_installed_realization_draws_a_live_page(engine: &Engine) {
     );
 }
 
+/// The raw evaluation path answers with the JSON encoding of the value.
+///
+/// The check itself is `waterui-webview`'s, shared with every engine: this
+/// engine once unwrapped strings to bare text, so `location.href` on a page at
+/// `first` and a page that returned the string `'first'` were the same bytes.
+fn the_raw_evaluation_path_answers_json(engine: &Engine) {
+    let page = engine.page();
+    page.open_page("/first");
+    page.block_on(raw_evaluation_answers_json(async |script| {
+        page.webview.run_javascript(script).await
+    }));
+}
+
 /// Every check, in the order they run.
 type Check = (&'static str, fn(&Engine));
 
-const CHECKS: [Check; 5] = [
+const CHECKS: [Check; 6] = [
     (
         "navigation_reaches_each_url_and_history_moves_both_ways",
         navigation_reaches_each_url_and_history_moves_both_ways,
+    ),
+    (
+        "the_raw_evaluation_path_answers_json",
+        the_raw_evaluation_path_answers_json,
     ),
     (
         "a_handler_reply_reaches_the_page_as_its_value_and_not_as_base64",

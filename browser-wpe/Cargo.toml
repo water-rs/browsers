@@ -64,7 +64,7 @@ required-features = ["real-engine"]
 
 [features]
 default = ["webview"]
-real-engine = ["webview"]
+real-engine = ["webview", "waterui-webview/conformance"]
 runtime-smoke = ["webview"]
 webview = [
     "dep:cookie",

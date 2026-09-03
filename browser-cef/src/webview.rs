@@ -340,13 +340,16 @@ impl CefWebViewHandle {
         if let Some(exception) = response.exception_details {
             return Err(Str::from(exception.text));
         }
-        if let Some(value) = response.result.value {
-            return Ok(Str::from(match value {
-                Value::String(value) => value,
-                value => value.to_string(),
-            }));
-        }
-        Ok(Str::from(response.result.description.unwrap_or_default()))
+        // The raw reply is the JSON encoding of the value, on every engine
+        // (`WebViewHandle::run_javascript`): a string arrives quoted, so a page
+        // at `first` and a page that returned `'first'` are told apart, and an
+        // evaluation that produced no value — `undefined`, or a function
+        // DevTools describes instead of serializing — is `null`, which is what
+        // JSON has for it.
+        Ok(Str::from(response.result.value.map_or_else(
+            || Value::Null.to_string(),
+            |value| value.to_string(),
+        )))
     }
 }
 
