@@ -155,10 +155,13 @@ jobs:
       # second `WpeRuntime` in a process is refused by the bridge. nextest gives
       # each test its own process, which is the shape these tests need rather
       # than a way around the contract. The crash reporter wraps it because a
-      # test binary that dies on a signal takes its output down with it.
+      # test binary that dies on a signal takes its output down with it, and
+      # `WATERUI_WPE_CONSOLE` puts each page's own console in the log, so a
+      # bridge script that throws says so instead of timing out in silence.
       - name: Test the WPE surfaces against the real engine
         run: |
           sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
           ulimit -c unlimited
-          browser-wpe/runtime/run-with-crash-report.py cargo nextest run \
-            -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke
+          WATERUI_WPE_CONSOLE=1 \
+            browser-wpe/runtime/run-with-crash-report.py cargo nextest run \
+              -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke

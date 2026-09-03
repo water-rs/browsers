@@ -895,6 +895,17 @@ WaterWpePage *water_wpe_page_new(
      * release tarball does not even ship the `HardwareAccelerationManager` they
      * consult. WPE composites on the GPU either way, which is why
      * `water_view_render_buffer` is handed a DMA-BUF for every frame. */
+    /* A JavaScript error in the injected bridge is reported to the page's own
+     * console, and the console goes nowhere by default: a page whose bridge
+     * threw is indistinguishable from one that simply never answered. Setting
+     * `WATERUI_WPE_CONSOLE` routes it to stdout, which is how a run that fails
+     * on a silent page gets to say why. It is off unless asked for, because a
+     * shipped application has no business printing a page's console to its
+     * standard output. */
+    if (g_getenv("WATERUI_WPE_CONSOLE") != NULL)
+        webkit_settings_set_enable_write_console_messages_to_stdout(
+            webkit_web_view_get_settings(page->web_view),
+            TRUE);
     page->view = webkit_web_view_get_wpe_view(page->web_view);
     g_assert(WATER_IS_VIEW(page->view));
     ((WaterView *)page->view)->page = page;
