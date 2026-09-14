@@ -48,8 +48,9 @@ jobs:
       # in its build script, because one links a CEF binary distribution and the
       # other stands in for it with documentation stubs. Every feature of both
       # crates is therefore named by the pass that covers it.
+      - uses: taiki-e/install-action@nextest
       - name: Test the default features
-        run: cargo test --workspace --all-targets
+        run: cargo nextest run --workspace --all-targets --no-tests warn
       # Chromium sandboxes its child processes with a user namespace when it can
       # and falls back to the setuid helper when it cannot. Ubuntu 24.04 refuses
       # unprivileged user namespaces by default, which forces the fallback onto
@@ -98,7 +99,7 @@ jobs:
       # Nothing stops being compiled here: the `Lint` job below builds the
       # real-engine target with `-D warnings`, and the `MSRV` job checks it.
       - name: Test the WPE surfaces
-        run: cargo test -p waterui-browser-wpe --all-targets --features runtime-smoke
+        run: cargo nextest run -p waterui-browser-wpe --all-targets --features runtime-smoke --no-tests warn
       - name: Compile the CEF backend without its binary distribution
         run: cargo check -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview
 
