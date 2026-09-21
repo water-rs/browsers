@@ -5,6 +5,12 @@ members = [
 ]
 resolver = "2"
 
+# The MSRV job reads the floor from this manifest: the root is a virtual
+# workspace, so the one place a `rust-version` line lives here is
+# `[workspace.package]`, inherited by every member.
+[workspace.package]
+rust-version = "1.95"
+
 [workspace.lints.rust]
 missing_docs = "warn"
 missing_debug_implementations = "warn"
