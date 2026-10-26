@@ -27,3 +27,22 @@ nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "warn"
 multiple_crate_versions = "allow"
+
+[patch.crates-io]
+# wgpu's Metal backend reads `kCGColorSpace*` globals to negotiate extended
+# Display P3; the water-rs fork backport carries the fix WaterUI pins.
+naga = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+naga-types = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-apple = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-emscripten = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-windows-linux-android = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-hal = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-naga-bridge = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-types = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+shaderloom = { git = "https://github.com/water-rs/shaderloom", branch = "dev" }
+# waterui's manifest asks for the published `suiteki` semver line; this repo
+# and waterui's workspace both patch it onto the git source so every `Str`
+# in the graph is the same crate.
+suiteki = { git = "https://github.com/water-rs/suiteki", branch = "dev" }
