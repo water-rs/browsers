@@ -13,7 +13,7 @@ use waterui_webview::{
     WebViewConfig, WebViewHandle, bridge,
 };
 
-use crate::cdp::{CefCdpSession, protocol};
+use crate::cdp::{CefCdpError, CefCdpSession, protocol};
 use crate::page::{CefController, CefPageConfiguration, CefPageHandle, CefPageMode};
 use crate::renderer::{RendererBundle, document_source};
 
@@ -602,12 +602,30 @@ fn install_bridge(session: &CefCdpSession, main_frame: &Rc<RefCell<Option<String
     let tree = session.execute(&protocol::GetFrameTree {});
     let main_frame = Rc::clone(main_frame);
     executor_core::spawn_local(async move {
-        let tree = tree
-            .await
-            .expect("CEF must describe the frame tree of a page it just created");
-        main_frame.replace(Some(tree.frame_tree.frame.id));
+        if let Some(id) = initial_main_frame(tree.await) {
+            main_frame.replace(Some(id));
+        }
     })
     .detach();
+}
+
+/// Reads the just-created page's main frame id out of `GetFrameTree`.
+///
+/// A `Detached` or `PageClosed` reply means the page went away before the
+/// answer arrived — there is no frame to record, and `Page.frameNavigated`
+/// reports the id when a page survives anyway. Every other failure means the
+/// session answered and is still wrong, which `expect` used to conflate with
+/// the normal close race.
+fn initial_main_frame(
+    result: Result<protocol::GetFrameTreeResponse, CefCdpError>,
+) -> Option<String> {
+    match result {
+        Ok(tree) => Some(tree.frame_tree.frame.id),
+        Err(CefCdpError::Detached | CefCdpError::PageClosed { .. }) => None,
+        Err(error) => panic!(
+            "CEF must describe the frame tree of a page it just created: {error}"
+        ),
+    }
 }
 
 /// Issues a command whose result nobody waits for.
@@ -646,4 +664,47 @@ fn cookie_from_cdp(cookie: &protocol::Cookie) -> Result<Cookie<'static>, waterui
         )?);
     }
     Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cdp::protocol::{FrameDescription, FrameTree};
+
+    fn response(id: &str) -> protocol::GetFrameTreeResponse {
+        protocol::GetFrameTreeResponse {
+            frame_tree: FrameTree {
+                frame: FrameDescription { id: id.to_owned() },
+            },
+        }
+    }
+
+    #[test]
+    fn the_created_pages_main_frame_is_recorded() {
+        assert_eq!(
+            initial_main_frame(Ok(response("main"))).as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn a_page_that_closed_before_the_reply_has_no_frame_to_record() {
+        assert!(initial_main_frame(Err(CefCdpError::Detached)).is_none());
+        assert!(
+            initial_main_frame(Err(CefCdpError::PageClosed {
+                method: "Page.getFrameTree".to_owned()
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "CEF must describe the frame tree of a page it just created")]
+    fn an_answered_but_wrong_reply_still_fails() {
+        let _ = initial_main_frame(Err(CefCdpError::Protocol {
+            method: "Page.getFrameTree".to_owned(),
+            code: -32000,
+            message: "Cannot find context with specified id".to_owned(),
+        }));
+    }
 }
