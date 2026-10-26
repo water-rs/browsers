@@ -102,6 +102,57 @@ impl LocalExecutor for TestExecutor {
     }
 }
 
+/// Raises `GLib` `g_critical` to a trap for the life of one test, restored
+/// when it drops. The library mapping the symbol lives in the scope, so the
+/// stored pointer outlives every call into it.
+struct GlibCriticalScope {
+    _library: libloading::Library,
+    set: unsafe extern "C" fn(u32) -> u32,
+    previous: u32,
+}
+
+impl GlibCriticalScope {
+    fn new(paths: &WpeRuntimePaths) -> Self {
+        const G_LOG_LEVEL_CRITICAL: u32 = 1 << 3;
+        // SAFETY: the library is the runtime's own glib; the symbol is the
+        // documented `g_log_set_always_fatal` C ABI, and `_library` keeps the
+        // mapping alive past every call.
+        let library = unsafe {
+            libloading::Library::new(paths.root().join("lib/libglib-2.0.so.0"))
+                .expect("the staged runtime carries libglib-2.0")
+        };
+        // SAFETY: `g_log_set_always_fatal` has the C signature (GLogLevelFlags
+        // -> GLogLevelFlags), both of which are u32 on this ABI.
+        let set = unsafe {
+            *library
+                .get::<unsafe extern "C" fn(u32) -> u32>(b"g_log_set_always_fatal\0")
+                .expect("glib exports g_log_set_always_fatal")
+        };
+        // SAFETY: `set` points into the retained library and takes the mask
+        // by value, exactly as the C prototype declares. The first call reads
+        // the previous mask out; the second installs the OR'd set so fatal
+        // flags a host already carried stay set.
+        let previous = unsafe {
+            let previous = set(G_LOG_LEVEL_CRITICAL);
+            set(previous | G_LOG_LEVEL_CRITICAL);
+            previous
+        };
+        Self {
+            _library: library,
+            set,
+            previous,
+        }
+    }
+}
+
+impl Drop for GlibCriticalScope {
+    fn drop(&mut self) {
+        // SAFETY: `Drop` runs before the `_library` field is released, so
+        // the pointer is still valid for the restore.
+        unsafe { (self.set)(self.previous) };
+    }
+}
+
 /// One WPE runtime, one page, and the server the page is loaded from.
 struct RealEngine {
     server: Server,
@@ -114,6 +165,9 @@ struct RealEngine {
     echoed: Rc<RefCell<Option<Value>>>,
     /// Dropping this unsubscribes, and every wait below is on an event.
     _events: WatcherGuard,
+    /// Declared last: it restores the fatal mask only after every engine
+    /// field above has dropped.
+    _criticals: GlibCriticalScope,
 }
 
 impl core::fmt::Debug for RealEngine {
@@ -151,6 +205,10 @@ fn runtime_paths() -> WpeRuntimePaths {
 impl RealEngine {
     /// Starts the server, initializes the runtime and opens one page.
     fn start() -> Self {
+        // Criticals go fatal before any runtime work starts, and the scope
+        // restores the mask only after every engine field has dropped.
+        let paths = runtime_paths();
+        let criticals = GlibCriticalScope::new(&paths);
         let server = Server::http("127.0.0.1:0").expect("bind the local page server");
         let address = server
             .server_addr()
@@ -163,7 +221,7 @@ impl RealEngine {
 
         // The runtime is kept so one test can start its message pump; every
         // other test drives the loop by hand from `step`.
-        let runtime = WpeRuntime::initialize(&runtime_paths());
+        let runtime = WpeRuntime::initialize(&paths);
         let page = WpePage::new(runtime.clone());
         // A viewport the engine would lay a document out in; the default is the
         // one-pixel toplevel the bridge creates a view with.
@@ -248,6 +306,7 @@ impl RealEngine {
             reports,
             echoed,
             _events: guard,
+            _criticals: criticals,
         }
     }
 
