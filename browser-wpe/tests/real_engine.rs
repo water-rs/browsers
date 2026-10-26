@@ -702,7 +702,6 @@ fn page_teardown_disconnects_retained_emitters_and_closes_assets() {
         "-B".into(),
         build_dir.as_os_str().to_owned(),
         "-DCMAKE_BUILD_TYPE=Release".into(),
-        "-DPKG_CONFIG_ARGN=--define-prefix".into(),
         "-DWATER_WPE_BUILD_LIFETIME_TEST=ON".into(),
         format!("-DWATER_WPE_TEST_RUNTIME_ROOT={}", paths.root().display()).into(),
         format!("-DWATER_WPE_TEST_OUTPUT_NAME={output_name}").into(),
