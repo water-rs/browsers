@@ -937,12 +937,6 @@ WaterWpePage *water_wpe_page_new(
 void water_wpe_page_free(WaterWpePage *page)
 {
     g_assert(page != NULL);
-    /* Close the renderer this page owns explicitly: disconnect our signal
-       handlers first so the intentional termination is not reported back as
-       a spontaneous web-process crash. Each page has its own WebContext, so
-       this ends only this view's process. */
-    g_signal_handlers_disconnect_by_data(page->web_view, page);
-    webkit_web_view_terminate_web_process(page->web_view);
     g_hash_table_remove(page->runtime->views, page->web_view);
     if (page->asset_destroy)
         page->asset_destroy(page->asset_user_data);
