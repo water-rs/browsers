@@ -56,13 +56,13 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 serde_json = "1.0"
 thiserror = "2.0.19"
 tracing = "0.1.44"
-waterui-chromium = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
-waterui-core = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev" }
-waterui-graphics = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev", features = ["gpu"] }
+waterui-chromium = { version = "0.5.1", optional = true }
+waterui-core = { version = "0.5.1" }
+waterui-graphics = { version = "0.5.1", features = ["gpu"] }
 suiteki = { git = "https://github.com/water-rs/suiteki.git", branch = "dev", optional = true }
-waterui-watcher-set = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
-waterui-url = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev" }
-waterui-webview = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
+waterui-watcher-set = { version = "0.5.1", optional = true }
+waterui-url = { version = "0.5.1" }
+waterui-webview = { version = "0.5.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = "0.9"
@@ -96,7 +96,7 @@ tiny_http = "0.12"
 tempfile = "3.27"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The shared real-engine assertions; `real-engine` already selects `webview`.
-waterui-webview = { version = "0.5.1", git = "https://github.com/water-rs/waterui.git", branch = "dev", features = ["conformance"] }
+waterui-webview = { version = "0.5.1", features = ["conformance"] }
 
 [[test]]
 name = "real_engine"
