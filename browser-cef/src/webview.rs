@@ -622,9 +622,7 @@ fn initial_main_frame(
     match result {
         Ok(tree) => Some(tree.frame_tree.frame.id),
         Err(CefCdpError::Detached | CefCdpError::PageClosed { .. }) => None,
-        Err(error) => panic!(
-            "CEF must describe the frame tree of a page it just created: {error}"
-        ),
+        Err(error) => panic!("CEF must describe the frame tree of a page it just created: {error}"),
     }
 }
 

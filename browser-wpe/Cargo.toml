@@ -19,6 +19,8 @@ categories = ["gui", "web-programming"]
 # the exact crate version it depends on rather than keeping a copy of its own.
 [package.metadata.waterui.wpe-runtime]
 version = "2.52.5"
+bridge-abi = 5
+native-source = "native"
 
 [lints]
 workspace = true

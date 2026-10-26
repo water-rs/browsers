@@ -169,9 +169,6 @@ jobs:
         env:
           WATERUI_WPE_RUNTIME: ${{ env.WATERUI_WPE_PREFIX }}
           WATERUI_WPE_CONSOLE: "1"
-          # Abort on the first invalid g_object_unref so the core setup and
-          # crash wrapper yield the owning stack instead of a logged warning.
-          G_DEBUG: fatal-criticals
         run: |
           sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
           ulimit -c unlimited

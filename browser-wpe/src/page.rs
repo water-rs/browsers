@@ -121,9 +121,11 @@ impl Drop for PendingReply {
 }
 
 struct PageInner {
-    runtime: WpeRuntime,
-    raw: NonNull<WaterWpePage>,
     state: Rc<PageState>,
+    raw: NonNull<WaterWpePage>,
+    /// Declared last: the runtime must outlive the state-held frames so its
+    /// final `g_main_context_iteration` drain runs after their release.
+    runtime: WpeRuntime,
 }
 
 impl Drop for PageInner {
@@ -208,9 +210,9 @@ impl WpePage {
         );
         Self {
             inner: Rc::new(PageInner {
-                runtime,
-                raw,
                 state,
+                raw,
+                runtime,
             }),
         }
     }
