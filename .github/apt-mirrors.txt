@@ -1,0 +1,2 @@
+https://archive.ubuntu.com/ubuntu/	priority:1
+https://security.ubuntu.com/ubuntu/	priority:2
