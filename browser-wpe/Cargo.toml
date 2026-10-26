@@ -54,6 +54,7 @@ xkeysym = { version = "0.2.1", optional = true }
 [dev-dependencies]
 base64 = "0.22"
 executor-core = { version = "0.7.1", features = ["async-executor"] }
+libtest-mimic = { version = "0.8.2", default-features = false }
 pollster = "1.0"
 tiny_http = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -71,6 +72,7 @@ required-features = ["runtime-smoke"]
 
 [[test]]
 name = "real_engine"
+harness = false
 required-features = ["real-engine"]
 
 [features]
