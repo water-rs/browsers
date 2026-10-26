@@ -1,0 +1,24 @@
+name: Add the pinned Clang's apt source
+description: >-
+  Registers the official LLVM apt repository for the Clang major that
+  `browser-wpe/runtime/source.toml` names as `minimum_clang`, and selects that
+  Clang as CC/CXX for the rest of the job. The jammy archive stops at Clang 15,
+  and apt.llvm.org is where upstream's own SDK takes newer ones from. The
+  calling step's own `apt-get update` and install pick the source up; the
+  package to install is exported as CLANG_PACKAGE.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        major="$(sed -n 's/^minimum_clang = "\([0-9]*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+        test -n "$major"
+        . /etc/os-release
+        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+        test "$(gpg --show-keys --with-colons /etc/apt/trusted.gpg.d/apt.llvm.org.asc | awk -F: '/^fpr:/ {print $10; exit}')" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+        echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$major main" | sudo tee /etc/apt/sources.list.d/llvm-toolchain.list
+        {
+          echo "CLANG_PACKAGE=clang-$major"
+          echo "CC=clang-$major"
+          echo "CXX=clang++-$major"
+        } >> "$GITHUB_ENV"

@@ -33,10 +33,10 @@ glib_dependencies_url="$(configuration_value glib_dependencies_url)"
 glib_dependencies_sha256="$(configuration_value glib_dependencies_sha256)"
 released="$(configuration_value released)"
 maximum_glibc="$(configuration_value maximum_glibc)"
-minimum_gcc="$(configuration_value minimum_gcc)"
+minimum_clang="$(configuration_value minimum_clang)"
 smoke_timeout_seconds="$(configuration_value smoke_timeout_seconds)"
 
-if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_gcc" || -z "$smoke_timeout_seconds" ]]; then
+if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_clang" || -z "$smoke_timeout_seconds" ]]; then
     echo "invalid WPE runtime source configuration" >&2
     exit 1
 fi
@@ -81,17 +81,33 @@ command -v "$cxx_compiler" >/dev/null || {
     echo "WPE runtime C++ compiler is unavailable: $cxx_compiler" >&2
     exit 1
 }
-compiler_banner="$($c_compiler --version | head -n 1)"
-if [[ "$compiler_banner" != *gcc* && "$compiler_banner" != *GCC* ]]; then
-    echo "WPE runtime requires GCC $minimum_gcc or newer; $c_compiler is $compiler_banner" >&2
+for compiler in "$c_compiler" "$cxx_compiler"; do
+    compiler_banner="$("$compiler" --version | head -n 1)"
+    if [[ "$compiler_banner" != *clang* && "$compiler_banner" != *Clang* ]]; then
+        echo "WPE runtime requires Clang $minimum_clang or newer; $compiler is $compiler_banner" >&2
+        exit 1
+    fi
+done
+actual_clang="$($c_compiler -dumpfullversion -dumpversion)"
+oldest_clang="$(printf '%s\n%s\n' "$actual_clang" "$minimum_clang" | sort -V | head -n 1)"
+if [[ "$oldest_clang" != "$minimum_clang" ]]; then
+    echo "WPE WebKit $version requires Clang $minimum_clang or newer; $c_compiler reports $actual_clang" >&2
     exit 1
 fi
-actual_gcc="$($c_compiler -dumpfullversion -dumpversion)"
-oldest_gcc="$(printf '%s\n%s\n' "$actual_gcc" "$minimum_gcc" | sort -V | head -n 1)"
-if [[ "$oldest_gcc" != "$minimum_gcc" ]]; then
-    echo "WPE WebKit $version requires GCC $minimum_gcc or newer; $c_compiler reports $actual_gcc" >&2
+
+# Clang keeps WebKit on libstdc++, and the libstdc++ the packaged runtime
+# ships is whichever one Clang picks — it links the newest GCC installation it
+# finds under /usr/lib/gcc, which is a property of the host and not of CC.
+# `package-runtime.py` bundles the resolved libstdc++.so.6 into the artifact,
+# so that choice is the artifact's C++ runtime floor. The floor is GCC 12's
+# today and stays it: the installation is named explicitly through
+# --gcc-install-dir rather than left to whichever GCC the next runner image
+# happens to carry.
+command -v gcc-12 >/dev/null || {
+    echo "WPE runtime compiles against GCC 12's libstdc++ and gcc-12 is unavailable" >&2
     exit 1
-fi
+}
+gcc_install_dir="$(dirname "$(gcc-12 -print-libgcc-file-name)")"
 
 actual_glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
 highest_glibc="$(printf '%s\n%s\n' "$actual_glibc" "$maximum_glibc" | sort -V | tail -n 1)"
@@ -227,7 +243,7 @@ sudo apt-get install -y --no-install-recommends \
 # build spawns `WPENetworkProcess` from the compiled-in `PKGLIBEXECDIR` and
 # nowhere else, so a relocated runtime cannot open a page. Developer mode is
 # therefore on, and what it drags along is put back: `-Werror` off (a release
-# compiled by a newer GCC is not ours to keep warning-free), and the options
+# compiled by a newer Clang is not ours to keep warning-free), and the options
 # whose defaults it flips — API tests, layout tests, MiniBrowser, the Qt
 # plugin, Thunder, JSC's restricted options — held at their production values
 # explicitly. What remains of it is the run-time `WEBKIT_*` environment hooks
@@ -247,6 +263,8 @@ webkit_options=(
     -DCMAKE_INSTALL_LIBEXECDIR=libexec
     -DCMAKE_C_COMPILER="$c_compiler"
     -DCMAKE_CXX_COMPILER="$cxx_compiler"
+    -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install_dir"
+    -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install_dir"
     -DCLANGD_AUTO_SETUP=OFF
     -DBWRAP_EXECUTABLE=/usr/bin/bwrap
     -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy
@@ -276,7 +294,7 @@ webkit_options=(
 # earlier run whose stamp still matches already holds this exact build, and the
 # hours go to whatever comes after it instead — the bridge, the packaging and
 # the smoke run, which is where a change to this crate lands.
-webkit_identity="$(printf '%s\n' "$source_sha256" "$actual_gcc" "${webkit_options[@]}" | sha256sum | cut -d ' ' -f 1)"
+webkit_identity="$(printf '%s\n' "$source_sha256" "$actual_clang" "${webkit_options[@]}" | sha256sum | cut -d ' ' -f 1)"
 webkit_installed="$work_directory/webkit-build-identity"
 installed_snapshot="$work_directory/install"
 if [[ "$(cat "$webkit_installed" 2>/dev/null)" != "$webkit_identity" ]]; then
@@ -316,6 +334,8 @@ cmake \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DCMAKE_C_COMPILER="$c_compiler" \
     -DCMAKE_CXX_COMPILER="$cxx_compiler" \
+    -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install_dir" \
+    -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install_dir" \
     -DCMAKE_PREFIX_PATH="$prefix"
 cmake --build "$bridge_build_directory"
 cmake --install "$bridge_build_directory"

@@ -26,6 +26,7 @@ on:
       - browser-wpe/runtime/**
       - .github/workflows/wpe-bridge.yml
       - .github/apt-mirrors.txt
+      - .github/actions/llvm-apt-source/**
 
 concurrency:
   group: wpe-bridge-${{ github.ref }}
@@ -36,15 +37,13 @@ jobs:
     name: Compile the C bridge
     # The same provisioning the packaged runtime is built on, and not a choice:
     # the prefix restored below holds headers and libraries produced by
-    # `wpe-real-engine.yml` on `ubuntu-22.04` with GCC 12, which
-    # `runtime/source.toml` pins through `maximum_glibc` and `minimum_gcc`.
+    # `wpe-real-engine.yml` on `ubuntu-22.04` with the Clang that
+    # `runtime/source.toml` pins through `maximum_glibc` and `minimum_clang`.
     runs-on: ubuntu-22.04
     timeout-minutes: 20
-    env:
-      CC: gcc-12
-      CXX: g++-12
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/llvm-apt-source
 
       # `native/CMakeLists.txt` asks pkg-config for five modules. Two of them —
       # `wpe-webkit-2.0` and `wpe-platform-2.0` — come from the restored prefix;
@@ -59,7 +58,7 @@ jobs:
           sudo cp .github/apt-mirrors.txt /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config gcc-12 g++-12 unzip \
+            cmake ninja-build pkg-config "$CLANG_PACKAGE" unzip \
             libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libdrm-dev
 
       # The packaged runtime `wpe-real-engine.yml` publishes, under that
