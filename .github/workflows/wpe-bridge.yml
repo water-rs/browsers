@@ -29,6 +29,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/wpe-bridge.yml
+      - .github/apt-mirrors.txt
 
 concurrency:
   group: wpe-bridge-${{ github.ref }}
@@ -57,6 +58,9 @@ jobs:
       # `libglib2.0-dev` and `libsoup-3.0-dev` answer for.
       - name: Install the bridge's build dependencies
         run: |
+          # Prefer the official Ubuntu archives over the Azure mirror, which
+          # stalled this step past the job timeout.
+          sudo cp .github/apt-mirrors.txt /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-fast install -y --no-install-recommends \
             cmake ninja-build pkg-config gcc-12 g++-12 unzip gdb \
