@@ -48,14 +48,38 @@
 //!
 //! One process therefore hosts one CEF runtime and every check runs against it,
 //! each on a web view of its own.
+//!
+//! Only the first constraint is a macOS one. No other platform has an
+//! application object to install, so the `NSApplication` subclass is compiled
+//! on macOS alone; everything else — the checks, the page server, the
+//! subprocess dispatch — is the same code everywhere.
+//!
+//! The second constraint has a counterpart on Linux and Windows rather than an
+//! exception. [`CefRuntimePaths::packaged`] resolves the runtime from the
+//! directory the executable was run from, so a `target/debug/deps` binary has
+//! no runtime beside it and `cef_initialize` never gets as far as trapping.
+//! [`staging`] answers every platform with the layout `water package` produces
+//! for it — an application bundle on macOS, a flat runtime directory on Linux
+//! and Windows — and the checks re-run from inside it.
+//!
+//! # What Linux and Windows need that macOS does not
+//!
+//! A CEF browser here is windowless and hands its frames over as a shared
+//! texture: a DMA-BUF exported by Chromium's GPU process on Linux, a Direct3D
+//! shared handle on Windows. That needs a GPU. A machine whose only adapter is
+//! a software rasterizer — Mesa's llvmpipe, Direct3D's WARP — has no GPU
+//! allocation to export, and Chromium refuses to create the browser at all.
+//! Hosted CI runners are such machines, so on both platforms [`gpu`] asks that
+//! question before CEF is initialized and these checks report a skip instead of
+//! failing on a null browser. macOS always has a GPU and always runs them.
+//!
+//! The skip is deliberately not a fallback: no software-rendering path exists
+//! in this backend, and the day a Linux or Windows machine with a GPU runs
+//! this, every check runs on it exactly as it does on macOS.
 
-#[cfg(not(target_os = "macos"))]
-compile_error!(
-    "the CEF real-engine tests drive a macOS application bundle, which is what CEF requires of a \
-     browser process on this platform; run them on a macOS host"
-);
-
-mod bundle;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod gpu;
+mod staging;
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -70,16 +94,17 @@ use executor_core::LocalExecutor;
 use executor_core::async_executor::AsyncLocalExecutor;
 use serde_json::Value;
 use tiny_http::{Header, Response, Server};
+#[cfg(target_os = "macos")]
+use waterui_browser_cef::initialize_macos_application;
 use waterui_browser_cef::{
-    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, initialize_macos_application, install,
-    run_packaged_subprocess,
+    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, install, run_packaged_subprocess,
 };
 use waterui_core::{Environment, View as _, view::Hook};
 use waterui_url::Url;
+use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, UserScript, WatcherGuard, WebView, WebViewConfig, WebViewController,
-    WebViewEvent,
+    ScriptMessageHandler, WatcherGuard, WebView, WebViewConfig, WebViewController, WebViewEvent,
 };
 
 /// How long one wait may take before the check gives up.
@@ -96,12 +121,12 @@ const UNREPRESENTABLE: u64 = 9_007_199_254_740_993;
 /// number rather than being tagged along with the one above.
 const REPRESENTABLE: u64 = 42;
 
-// The pages live with the shared webview crate because they exercise the shared
-// bridge contract; every real-engine suite loads the same ones.
-const FIRST_HTML: &str = include_str!("../../webview/tests/pages/first.html");
-const SECOND_HTML: &str = include_str!("../../webview/tests/pages/second.html");
-const CHECKS_JS: &str = include_str!("../../webview/tests/pages/checks.js");
-const STATE_SEED_JS: &str = include_str!("../../webview/tests/pages/state_seed.js");
+// The pages live at the workspace root because they exercise the shared bridge
+// contract; every real-engine suite in this repository loads the same ones.
+const FIRST_HTML: &str = include_str!("../../tests/pages/first.html");
+const SECOND_HTML: &str = include_str!("../../tests/pages/second.html");
+const CHECKS_JS: &str = include_str!("../../tests/pages/checks.js");
+const STATE_SEED_JS: &str = include_str!("../../tests/pages/state_seed.js");
 
 /// The local executor the page's handler replies are spawned onto.
 ///
@@ -160,6 +185,10 @@ impl Engine {
         let executor = TestExecutor(Rc::new(AsyncLocalExecutor::new()));
         executor_core::init_local_executor(executor.clone());
 
+        // The macOS browser process has to be a `CefAppProtocol` `NSApplication`
+        // subclass before anything asks for `sharedApplication`. Linux and
+        // Windows have no process-wide application object to install.
+        #[cfg(target_os = "macos")]
         initialize_macos_application();
         // `packaged` is the production resolution: the runtime staged beside the
         // executable inside the bundle. The cache is the one thing pointed
@@ -167,7 +196,7 @@ impl Engine {
         // user's cache directory is not a test that cleans up after itself.
         let runtime = CefRuntime::initialize(CefRuntimeConfiguration::new(
             CefRuntimePaths::packaged(),
-            bundle::workspace().join("cache"),
+            staging::workspace().join("cache"),
         ));
 
         Self {
@@ -211,18 +240,7 @@ impl Engine {
         }
     }
 
-    /// One turn of everything this test drives.
-    fn step(&self) {
-        self.serve();
-        let _ = self.runtime.pump();
-        while self.executor.0.try_tick() {}
-    }
-
-    /// Drives a future to completion on this loop.
-    ///
-    /// The engine's events only flow while it is pumped, so a future that waits
-    /// on one — the asset-origin conformance case waits on `Loaded` — has to be
-    /// polled from the pump loop rather than blocked on.
+    /// Drives one of the engine's futures to completion on this loop.
     fn block_on<F: Future>(&self, what: &str, future: F) -> F::Output {
         let mut future = pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -238,6 +256,13 @@ impl Engine {
             self.step();
             std::thread::yield_now();
         }
+    }
+
+    /// One turn of everything this test drives.
+    fn step(&self) {
+        self.serve();
+        let _ = self.runtime.pump();
+        while self.executor.0.try_tick() {}
     }
 
     fn url(&self, path: &str) -> Url {
@@ -266,18 +291,9 @@ struct Page<'a> {
 
 impl<'a> Page<'a> {
     fn open(engine: &'a Engine) -> Self {
-        // Exactly what `WebViewOpen::create` hands the engine: the admission
-        // rules and the scripts arrive with the view, before it can load
-        // anything.
-        let webview = engine.controller.open_with(
-            WebViewConfig::default()
-                .with_bridge_origins(OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/")))
-                .with_scripts(vec![UserScript::new(
-                    "waterui:test-state-seed",
-                    STATE_SEED_JS,
-                    ScriptInjectionTime::DocumentStart,
-                )]),
-        );
+        let mut config = WebViewConfig::default();
+        config.bridge_origins = OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/"));
+        let webview = engine.controller.open_with(config);
         let handle = webview.handle();
 
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -327,6 +343,12 @@ impl<'a> Page<'a> {
             })
         });
 
+        handle.inject_script(
+            "waterui:test-state-seed",
+            STATE_SEED_JS,
+            ScriptInjectionTime::DocumentStart,
+        );
+
         let page = Self {
             engine,
             webview,
@@ -339,14 +361,13 @@ impl<'a> Page<'a> {
         page
     }
 
-    /// Waits until the host side of the bridge is installed.
+    /// Waits until the document-start scripts are registered with the engine.
     ///
-    /// The transport binding, the domains whose events authenticate a call
-    /// and the main frame's id are set up with `DevTools` commands nobody
-    /// awaits, while navigation is an ordinary CEF call, so nothing orders the
-    /// two. `DevTools` commands on one session are answered in the order they
-    /// were issued, so an answer to a later one is the real signal that the
-    /// earlier ones have been applied.
+    /// The bridge and the seed script are installed with `DevTools` commands
+    /// nobody awaits, while navigation is an ordinary CEF call, so nothing
+    /// orders the two. `DevTools` commands on one session are answered in the
+    /// order they were issued, so an answer to a later one is the real signal
+    /// that the earlier ones have been applied.
     fn await_bridge_installation(&self) {
         let evaluated = self
             .block_on(self.webview.run_javascript("'installed'"))
@@ -441,12 +462,11 @@ impl<'a> Page<'a> {
 
     /// What the engine says the current document's URL is.
     fn location(&self) -> String {
-        let href = self
+        let json = self
             .block_on(self.webview.run_javascript("location.href"))
             .expect("location.href evaluates");
-        // The raw path answers JSON, so the URL arrives as a quoted string.
-        serde_json::from_str(&href)
-            .unwrap_or_else(|error| panic!("location.href answered {href}, not a string: {error}"))
+        serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("run_javascript answered `{json}`, not JSON: {error}"))
     }
 }
 
@@ -637,18 +657,24 @@ fn the_installed_realization_draws_a_live_page(engine: &Engine) {
     );
 }
 
-/// `run_javascript` answers the JSON encoding of the evaluated value, made by
-/// the page — the shared conformance case on a loaded document.
-fn raw_evaluation_answers_json(engine: &Engine) {
+/// The raw evaluation path answers with the JSON encoding of the value.
+///
+/// The check itself is `waterui-webview`'s, shared with every engine: this
+/// engine once unwrapped strings to bare text, so `location.href` on a page at
+/// `first` and a page that returned the string `'first'` were the same bytes.
+fn the_raw_evaluation_path_answers_json(engine: &Engine) {
     let page = engine.page();
     page.open_page("/first");
-    page.block_on(waterui_webview::conformance::raw_evaluation_answers_json(
-        async |script| page.webview.run_javascript(script).await,
-    ));
+    page.block_on(raw_evaluation_answers_json(async |script| {
+        page.webview.run_javascript(script).await
+    }));
 }
 
-/// The engine's asset origin serves the bundled site the shared conformance
-/// case drives — module script, stylesheet and WASM — as a secure context.
+/// Every check, in the order they run.
+type Check = (&'static str, fn(&Engine));
+
+/// The asset origin serves the bundled conformance site through CEF's native
+/// scheme handler — the shared case every engine's real-engine suite runs.
 fn the_asset_origin_serves_bundled_content(engine: &Engine) {
     engine.block_on(
         "the asset-origin conformance case",
@@ -779,13 +805,14 @@ async fn cdp_eval(cdp: &waterui_chromium::CdpSession, source: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Every check, in the order they run.
-type Check = (&'static str, fn(&Engine));
-
 const CHECKS: [Check; 10] = [
     (
         "navigation_reaches_each_url_and_history_moves_both_ways",
         navigation_reaches_each_url_and_history_moves_both_ways,
+    ),
+    (
+        "the_raw_evaluation_path_answers_json",
+        the_raw_evaluation_path_answers_json,
     ),
     (
         "a_handler_reply_reaches_the_page_as_its_value_and_not_as_base64",
@@ -799,7 +826,6 @@ const CHECKS: [Check; 10] = [
         "integers_beyond_two_to_the_fifty_third_cross_intact_both_ways",
         integers_beyond_two_to_the_fifty_third_cross_intact_both_ways,
     ),
-    ("raw_evaluation_answers_json", raw_evaluation_answers_json),
     (
         "the_installed_realization_draws_a_live_page",
         the_installed_realization_draws_a_live_page,
@@ -823,10 +849,11 @@ const CHECKS: [Check; 10] = [
 ];
 
 fn main() {
-    // Chromium launches its GPU, network and renderer processes from the helper
-    // bundles staged around this same executable, so a `--type=` argument means
-    // this process is one of them and never returns from here.
-    if bundle::is_child_process() {
+    // Chromium launches its GPU, network and renderer processes by re-executing
+    // this binary — through the helper bundles staged around it on macOS, and
+    // directly everywhere else — so a `--type=` argument means this process is
+    // one of them and never returns from here.
+    if staging::is_child_process() {
         std::process::exit(run_packaged_subprocess());
     }
 
@@ -837,15 +864,27 @@ fn main() {
         )
         .init();
 
-    // CEF traps rather than returning an error when its browser process is not
-    // bundled, so the checks run from a staged bundle around this executable.
-    if !bundle::running_bundled() {
-        let bundled = bundle::stage();
-        tracing::info!(executable = %bundled.display(), "re-running from the staged bundle");
-        let status = std::process::Command::new(&bundled)
+    // CEF cannot start from the executable cargo built: macOS traps outside an
+    // application bundle, and Linux and Windows resolve the runtime library
+    // beside the executable, where cargo staged nothing. Every platform re-runs
+    // the checks from the staged layout.
+    if !staging::running_staged() {
+        let staged = staging::stage();
+        tracing::info!(executable = %staged.display(), "re-running from the staged runtime");
+        let status = std::process::Command::new(&staged)
             .status()
-            .unwrap_or_else(|error| panic!("run {}: {error}", bundled.display()));
-        assert!(status.success(), "the bundled real-engine run {status}");
+            .unwrap_or_else(|error| panic!("run {}: {error}", staged.display()));
+        assert!(status.success(), "the staged real-engine run {status}");
+        return;
+    }
+
+    // Asked here, from the staged runtime, so that staging and the re-execution
+    // are still exercised on a machine that cannot run the checks themselves —
+    // and asked before `Engine::start`, because CEF refuses the shared-texture
+    // browser these checks need without a GPU and says nothing about why.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if let Some(reason) = gpu::unusable_reason() {
+        tracing::warn!("skipping the CEF real-engine checks: {reason}");
         return;
     }
 

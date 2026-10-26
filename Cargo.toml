@@ -9,7 +9,7 @@ resolver = "2"
 # workspace, so the one place a `rust-version` line lives here is
 # `[workspace.package]`, inherited by every member.
 [workspace.package]
-rust-version = "1.95"
+rust-version = "1.99"
 
 [workspace.lints.rust]
 missing_docs = "warn"
