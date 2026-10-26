@@ -104,7 +104,8 @@ use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, WatcherGuard, WebView, WebViewConfig, WebViewController, WebViewEvent,
+    ScriptMessageHandler, UserScript, WatcherGuard, WebView, WebViewConfig, WebViewController,
+    WebViewEvent,
 };
 
 /// How long one wait may take before the check gives up.
@@ -293,6 +294,11 @@ impl<'a> Page<'a> {
     fn open(engine: &'a Engine) -> Self {
         let mut config = WebViewConfig::default();
         config.bridge_origins = OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/"));
+        config.scripts = vec![UserScript::new(
+            "waterui:test-state-seed",
+            STATE_SEED_JS,
+            ScriptInjectionTime::DocumentStart,
+        )];
         let webview = engine.controller.open_with(config);
         let handle = webview.handle();
 
@@ -342,12 +348,6 @@ impl<'a> Page<'a> {
                 ().into_js_reply()
             })
         });
-
-        handle.inject_script(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        );
 
         let page = Self {
             engine,

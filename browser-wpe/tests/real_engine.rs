@@ -49,7 +49,8 @@ use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, WatcherGuard, WebViewConfig, WebViewEvent, WebViewHandle as _,
+    ScriptMessageHandler, UserScript, WatcherGuard, WebViewConfig, WebViewEvent,
+    WebViewHandle as _,
 };
 
 /// Names the staged WPE runtime root these tests drive.
@@ -177,6 +178,11 @@ impl RealEngine {
         // what `BridgeOrigins::Initial` means — handed in the same way
         // `WpeController::open` hands it, through the view's config.
         let mut config = WebViewConfig::default();
+        config.scripts = vec![UserScript::new(
+            "waterui:test-state-seed",
+            STATE_SEED_JS,
+            ScriptInjectionTime::DocumentStart,
+        )];
         config.bridge_origins = OriginPolicy::new(
             BridgeOrigins::Initial,
             &base
@@ -231,12 +237,6 @@ impl RealEngine {
                 ().into_js_reply()
             })
         });
-
-        handle.inject_script(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        );
 
         Self {
             server,
