@@ -634,3 +634,101 @@ fn a_background_timer_reaches_the_bridge_without_input_or_rendering() {
         "the timer reported without having applied its DOM mutation"
     );
 }
+
+/// The page-callback lifetime fixture: builds the whitebox shared object the
+/// native `CMake` option produces, loads it against this process's staged
+/// runtime, and runs the deterministic ownership assertions inside it.
+///
+/// No `RealEngine`, no `WpeRuntime` — loading the bridge twice would register
+/// its private `GTypes` again, so the fixture runs in this isolated test
+/// process instead.
+#[test]
+fn page_teardown_disconnects_retained_emitters_and_closes_assets() {
+    let paths = runtime_paths();
+    let _criticals = GlibCriticalScope::new(&paths);
+    let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("native");
+    let build_dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("wpe-lifetime-build-{}", std::process::id()));
+    let output_name = format!("wpe_lifetime_test_{}", std::process::id());
+    let pkg_config_path = std::env::join_paths(
+        [
+            paths.root().join("lib/pkgconfig"),
+            paths.root().join("share/pkgconfig"),
+        ]
+        .into_iter()
+        .chain(
+            std::env::var_os("PKG_CONFIG_PATH")
+                .as_deref()
+                .map(std::env::split_paths)
+                .into_iter()
+                .flatten(),
+        ),
+    )
+    .expect("the scoped pkg-config path joins");
+
+    // Both `CMake` invocations share one budget; `timeout` bounds the whole
+    // process group so a wedged configure cannot hang the test.
+    let deadline = Instant::now() + TIMEOUT;
+    let run = |args: &[std::ffi::OsString]| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the lifetime fixture build ran out of budget"
+        );
+        let seconds = remaining.as_secs().max(1);
+        let output = std::process::Command::new("timeout")
+            .arg("--kill-after=5s")
+            .arg(format!("{seconds}s"))
+            .arg("cmake")
+            .args(args)
+            .env("PKG_CONFIG_PATH", &pkg_config_path)
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => panic!("cmake could not run: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "cmake failed for the lifetime fixture (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run(&[
+        "-S".into(),
+        native.as_os_str().to_owned(),
+        "-B".into(),
+        build_dir.as_os_str().to_owned(),
+        "-DCMAKE_BUILD_TYPE=Release".into(),
+        "-DPKG_CONFIG_ARGN=--define-prefix".into(),
+        "-DWATER_WPE_BUILD_LIFETIME_TEST=ON".into(),
+        format!("-DWATER_WPE_TEST_RUNTIME_ROOT={}", paths.root().display()).into(),
+        format!("-DWATER_WPE_TEST_OUTPUT_NAME={output_name}").into(),
+    ]);
+    run(&[
+        "--build".into(),
+        build_dir.as_os_str().to_owned(),
+        "--target".into(),
+        "wpe_lifetime_test".into(),
+    ]);
+
+    // The fixture is loaded for the rest of the process — its embedded copy
+    // of the bridge registers private `GTypes` that keep code pointers, so
+    // the library must stay mapped like the production bridge does.
+    let library = std::mem::ManuallyDrop::new(unsafe {
+        // SAFETY: the fixture's path is inside the staged runtime root this
+        // test built it into.
+        libloading::Library::new(paths.root().join(format!("lib/lib{output_name}.so")))
+            .expect("the lifetime fixture loads")
+    });
+    unsafe {
+        // SAFETY: the fixture's sole export is a `void(void)` entry the C
+        // file defines; the library stays mapped for the process's life.
+        let entry = library
+            .get::<unsafe extern "C" fn()>(b"water_wpe_test_page_callback_lifetime\0")
+            .expect("the lifetime fixture exports its entry point");
+        entry();
+    }
+}

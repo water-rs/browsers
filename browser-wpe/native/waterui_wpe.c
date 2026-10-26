@@ -31,12 +31,41 @@ struct WaterWpeRuntime {
     GMainContext *context;
     WPEDisplay *delegate;
     WPEDisplay *display;
-    /* `WebKitWebView` → `WaterWpePage`, so the context-wide `waterui` scheme
-     * callback can resolve which page — and which asset server — a request
-     * belongs to. Keys and values are borrowed: `water_wpe_page_free` removes
-     * its entry. */
-    GHashTable *views;
 };
+
+/* The context-owned `waterui` scheme binding: the Rust callback the URI
+ * handler invokes. The registration's destroy notify frees it when the
+ * context dies; a page that tears down earlier closes the Rust callback
+ * first so the handler can never call freed state. */
+typedef struct {
+    WaterWpeAssetCallback callback;
+    void *user_data;
+    WaterWpeDestroyNotify destroy;
+} WaterWpeAssetBinding;
+
+/* Close the Rust callback exactly once: the fields clear before the foreign
+ * destructor runs, so a re-entrant observer sees the binding already closed.
+ */
+static void water_wpe_asset_binding_close(WaterWpeAssetBinding *binding)
+{
+    WaterWpeDestroyNotify destroy = binding->destroy;
+    void *user_data = binding->user_data;
+    binding->callback = NULL;
+    binding->user_data = NULL;
+    binding->destroy = NULL;
+    if (destroy)
+        destroy(user_data);
+}
+
+/* The context's registration owns the binding: freeing it closes any Rust
+ * callback still installed, then releases the storage. */
+static void water_wpe_asset_binding_free(gpointer data)
+{
+    WaterWpeAssetBinding *binding = data;
+    water_wpe_asset_binding_close(binding);
+    g_free(binding);
+}
+
 
 struct WaterWpePage {
     WaterWpeRuntime *runtime;
@@ -50,13 +79,10 @@ struct WaterWpePage {
     WaterWpeMessageCallback message_callback;
     void *user_data;
     WaterWpeDestroyNotify destroy_user_data;
-    /* The page's `waterui://localhost` server, or all-NULL when the page was
-     * created without one. */
-    WaterWpeAssetCallback asset_callback;
-    void *asset_user_data;
-    WaterWpeDestroyNotify asset_destroy;
+    /* The page's `waterui://localhost` binding, borrowed from its context's
+     * scheme registration, or NULL while the page serves no assets. */
+    WaterWpeAssetBinding *asset_binding;
     gboolean redirects_enabled;
-    gboolean asset_scheme_registered;
     char *last_uri;
     char *bridge_origin_wire;
     /* Document scripts by key, so injecting again under a key replaces the
@@ -512,14 +538,12 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
     WaterWpeRuntime *runtime = g_new0(WaterWpeRuntime, 1);
     runtime->context = g_main_context_ref_thread_default();
     runtime->delegate = wpe_display_headless_new();
-    runtime->views = g_hash_table_new(g_direct_hash, g_direct_equal);
     GError *display_error = NULL;
     if (!wpe_display_connect(runtime->delegate, &display_error)) {
         *error = g_strdup(display_error->message);
         g_error_free(display_error);
         g_object_unref(runtime->delegate);
         g_main_context_unref(runtime->context);
-        g_hash_table_unref(runtime->views);
         g_free(runtime);
         g_atomic_int_set(&water_wpe_runtime_live, 0);
         return NULL;
@@ -556,7 +580,6 @@ void water_wpe_runtime_free(WaterWpeRuntime *runtime)
     }
     g_object_unref(runtime->display);
     g_object_unref(runtime->delegate);
-    g_hash_table_unref(runtime->views);
     g_main_context_unref(runtime->context);
     g_free(runtime);
     g_atomic_int_set(&water_wpe_runtime_live, 0);
@@ -894,7 +917,6 @@ WaterWpePage *water_wpe_page_new(
     wpe_view_set_toplevel(page->view, page->toplevel);
     wpe_toplevel_resize(page->toplevel, 1, 1);
     wpe_view_set_visible(page->view, TRUE);
-    g_hash_table_insert(runtime->views, page->web_view, page);
 
     g_signal_connect(
         page->web_view,
@@ -937,9 +959,18 @@ WaterWpePage *water_wpe_page_new(
 void water_wpe_page_free(WaterWpePage *page)
 {
     g_assert(page != NULL);
-    g_hash_table_remove(page->runtime->views, page->web_view);
-    if (page->asset_destroy)
-        page->asset_destroy(page->asset_user_data);
+    /* Retained emitters outlive the page — WebKit's message task holds the
+     * web view, and the context and content manager are shared objects — so
+     * every handler carrying it as user data disconnects before anything it
+     * owns starts tearing down. */
+    g_signal_handlers_disconnect_by_data(page->web_view, page);
+    g_signal_handlers_disconnect_by_data(page->web_context, page);
+    g_signal_handlers_disconnect_by_data(page->content_manager, page);
+    if (page->asset_binding) {
+        /* Close the Rust callback before the page's destructors run; the
+         * binding stays allocated, owned by the context's registration. */
+        water_wpe_asset_binding_close(page->asset_binding);
+    }
     ((WaterView *)page->view)->page = NULL;
     wpe_view_closed(page->view);
     wpe_toplevel_closed(page->toplevel);
@@ -1069,25 +1100,29 @@ void water_wpe_reply_free(WaterWpeReply *reply)
 }
 
 /* Answers one `waterui` request WebKit routed to the shared web context. The
- * page the request belongs to — and whether it serves assets at all — comes
- * from the runtime's view table. The URI the engine reports is handed to the
- * page's callback whole; the host, method and traversal rules live on the Rust
- * side, which shares them with every other engine. */
+ * binding the registration carries is the page's own asset server; a closed
+ * one fails the request rather than answering for a torn-down page. The URI
+ * the engine reports is handed to the callback whole; the host, method and
+ * traversal rules live on the Rust side, which shares them with every other
+ * engine. */
 static void water_wpe_scheme_request(
     WebKitURISchemeRequest *request,
     gpointer user_data)
 {
-    WaterWpeRuntime *runtime = user_data;
-    WebKitWebView *view = webkit_uri_scheme_request_get_web_view(request);
-    WaterWpePage *page =
-        view ? g_hash_table_lookup(runtime->views, view) : NULL;
-    WaterWpeAssetResponse response = { 404, { 0 }, { 0 } };
-    if (page && page->asset_callback) {
-        response = page->asset_callback(
-            page->asset_user_data,
-            webkit_uri_scheme_request_get_http_method(request),
-            webkit_uri_scheme_request_get_uri(request));
+    WaterWpeAssetBinding *binding = user_data;
+    if (!binding->callback) {
+        GError *error = g_error_new_literal(
+            G_IO_ERROR,
+            G_IO_ERROR_CLOSED,
+            "the waterui asset server is closed");
+        webkit_uri_scheme_request_finish_error(request, error);
+        g_error_free(error);
+        return;
     }
+    WaterWpeAssetResponse response = binding->callback(
+        binding->user_data,
+        webkit_uri_scheme_request_get_http_method(request),
+        webkit_uri_scheme_request_get_uri(request));
 
     GInputStream *stream = g_memory_input_stream_new_from_data(
         g_memdup2(response.body.data, response.body.len),
@@ -1138,24 +1173,36 @@ void water_wpe_page_set_asset_server(
     g_assert(page != NULL);
     g_assert(callback != NULL);
     g_assert(destroy != NULL);
-    if (page->asset_destroy)
-        page->asset_destroy(page->asset_user_data);
-    page->asset_callback = callback;
-    page->asset_user_data = user_data;
-    page->asset_destroy = destroy;
-    if (page->asset_scheme_registered)
+    if (!page->asset_binding) {
+        /* The first registration hands the binding to the context, whose
+         * destroy notify frees it; the page only borrows the pointer. */
+        page->asset_binding = g_new0(WaterWpeAssetBinding, 1);
+        webkit_web_context_register_uri_scheme(
+            page->web_context,
+            "waterui",
+            water_wpe_scheme_request,
+            page->asset_binding,
+            water_wpe_asset_binding_free);
+        WebKitSecurityManager *manager =
+            webkit_web_context_get_security_manager(page->web_context);
+        /* `secure` and `local` give the origin `isSecureContext` and
+         * same-origin storage; `cors_enabled` keeps `fetch` honouring CORS. */
+        webkit_security_manager_register_uri_scheme_as_secure(manager, "waterui");
+        webkit_security_manager_register_uri_scheme_as_local(manager, "waterui");
+        webkit_security_manager_register_uri_scheme_as_cors_enabled(
+            manager, "waterui");
+        page->asset_binding->callback = callback;
+        page->asset_binding->user_data = user_data;
+        page->asset_binding->destroy = destroy;
         return;
-    page->asset_scheme_registered = TRUE;
-    webkit_web_context_register_uri_scheme(
-        page->web_context, "waterui", water_wpe_scheme_request, page->runtime, NULL);
-    WebKitSecurityManager *manager =
-        webkit_web_context_get_security_manager(page->web_context);
-    /* `secure` and `local` give the origin `isSecureContext` and same-origin
-     * storage; `cors_enabled` keeps `fetch` honouring CORS. */
-    webkit_security_manager_register_uri_scheme_as_secure(manager, "waterui");
-    webkit_security_manager_register_uri_scheme_as_local(manager, "waterui");
-    webkit_security_manager_register_uri_scheme_as_cors_enabled(
-        manager, "waterui");
+    }
+    /* Install first, close second: a foreign destructor that re-enters this
+     * function finds the new callback already installed and nests inside it
+     * instead of being clobbered by the outer write. */
+    WaterWpeAssetBinding previous = *page->asset_binding;
+    *page->asset_binding =
+        (WaterWpeAssetBinding) { callback, user_data, destroy };
+    water_wpe_asset_binding_close(&previous);
 }
 
 void water_wpe_page_load_uri(WaterWpePage *page, const char *uri)
