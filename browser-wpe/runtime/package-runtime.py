@@ -304,6 +304,52 @@ def copy_dependency_closure(
     return copied_sources, system_requirements
 
 
+# A reference to the build prefix at a whole path: after the start of a value,
+# whitespace, a quote or a `-I`/`-L` flag, and before `/`, whitespace, a quote
+# or the end of the line.
+PKG_CONFIG_PREFIX_REFERENCE = r"(^|[\s=\"']|-[IL])%s(?=[/\s\"']|$)"
+
+
+def relocate_pkg_config(root: pathlib.Path) -> None:
+    """Rewrites the runtime's pkg-config descriptors relative to themselves.
+
+    CMake installed them with `prefix=` set to the prefix WebKit was built at,
+    which no machine the runtime is unpacked on has. `${pcfiledir}` is
+    pkg-config's own variable for the directory a descriptor sits in, so a
+    prefix declared through it resolves wherever the runtime lands without
+    `--define-prefix`, which would also rewrite the host descriptors the
+    runtime's ones require. The new prefix leads because it depends on no
+    variable; every other absolute reference to the old one becomes
+    `${prefix}`."""
+    for directory in ("lib/pkgconfig", "share/pkgconfig"):
+        for descriptor in sorted((root / directory).glob("*.pc")):
+            if descriptor.is_symlink():
+                raise RuntimeError(f"{descriptor} is a symlink, not a descriptor")
+            lines = descriptor.read_text().splitlines(keepends=True)
+            prefixes = [
+                index
+                for index, line in enumerate(lines)
+                if "=" in line and line.split("=", maxsplit=1)[0].strip() == "prefix"
+            ]
+            if len(prefixes) != 1:
+                raise RuntimeError(
+                    f"{descriptor} declares {len(prefixes)} prefixes; expected one"
+                )
+            built_at = lines.pop(prefixes[0]).split("=", maxsplit=1)[1].strip()
+            if not built_at.startswith("/"):
+                raise RuntimeError(
+                    f"{descriptor} declares the non-absolute prefix {built_at!r}"
+                )
+            parents = "/".join(".." for _ in descriptor.parent.relative_to(root).parts)
+            body = re.sub(
+                PKG_CONFIG_PREFIX_REFERENCE % re.escape(built_at),
+                lambda match: match.group(1) + "${prefix}",
+                "".join(lines),
+                flags=re.MULTILINE,
+            )
+            descriptor.write_text(f"prefix=${{pcfiledir}}/{parents}\n{body}")
+
+
 def set_relative_rpaths(root: pathlib.Path) -> None:
     library_root = root / "lib"
     for path in sorted(root.rglob("*")):
@@ -512,6 +558,7 @@ def main() -> None:
     )
     packaged_sources.update(plugin_sources)
     set_relative_rpaths(root)
+    relocate_pkg_config(root)
     validate_glibc(root, arguments.maximum_glibc)
     system_packages = copy_licenses(
         root, arguments.source, arguments.repository, packaged_sources
