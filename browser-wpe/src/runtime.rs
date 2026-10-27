@@ -224,8 +224,8 @@ impl RuntimeApi {
 }
 
 // SAFETY: the bridge ABI explicitly permits calling the frame-completion
-// functions from wgpu's completion thread, and libloading keeps the module mapped
-// until the final `Arc` drops, so the function pointers stay valid.
+// functions from wgpu's completion thread, and the module stays mapped for the
+// life of the process, so the function pointers stay valid.
 unsafe impl Send for RuntimeApi {}
 // SAFETY: see the `Send` impl — the API holds only function pointers into a module
 // that stays mapped, with no interior mutability.
@@ -241,10 +241,17 @@ struct RuntimeInner {
 }
 
 impl Drop for RuntimeInner {
+    /// Frees the runtime, and says so on both sides of the call.
+    ///
+    /// `water_wpe_runtime_free` drains the main context before it releases the
+    /// display, so the two events bracket every queued frame completion that
+    /// had not run yet.
     fn drop(&mut self) {
+        tracing::debug!("freeing the WPE runtime");
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.api.api.runtime_free)(self.raw.as_ptr()) };
+        tracing::debug!("freed the WPE runtime");
     }
 }
 
@@ -263,10 +270,18 @@ impl core::fmt::Debug for WpeRuntime {
 impl WpeRuntime {
     /// Loads and initializes the exact staged WPE runtime.
     ///
+    /// One runtime is live per process at a time. WPE `WebKit` is a process-wide
+    /// singleton — its `GLib` types and its display belong to one runtime on
+    /// the thread that owns its main context — so a second one is refused by
+    /// the bridge rather than left to abort somewhere inside the engine.
+    /// Dropping a [`WpeRuntime`] releases the claim; work that needs two
+    /// belongs in two processes, which is why the real-engine tests run one
+    /// test per process.
+    ///
     /// # Panics
     ///
-    /// Panics when the runtime is missing, invalid, ABI-incompatible, or fails
-    /// to initialize.
+    /// Panics when the runtime is missing, invalid, ABI-incompatible, already
+    /// live in this process, or fails to initialize.
     #[must_use]
     pub fn initialize(paths: &WpeRuntimePaths) -> Self {
         let api = RuntimeApi::load(paths);
