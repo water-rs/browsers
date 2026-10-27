@@ -16,9 +16,8 @@ use wgpu_external_frame::dma_buf::{DmaBufFrame, DmaBufImporter};
 struct FrameOptions {
     force_opaque: u32,
     /// WGSL rounds a uniform struct up to a multiple of 16 bytes. The shader
-    /// spells that tail out as three scalars rather than a `vec3<u32>`,
-    /// because a `vec3` is itself 16-byte aligned and would push the block to
-    /// 32; this is the same tail on the host side.
+    /// declares the flag as a `vec4<u32>` and reads only its `x` lane, so the
+    /// block is exactly 16 bytes; these are the three lanes it never reads.
     _padding: [u32; 3],
 }
 
