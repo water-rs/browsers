@@ -120,6 +120,23 @@ const TRANSPORT_SCRIPT_KEY: &str = "waterui:wpe-transport";
 /// The key the shared bridge and evaluation wrapper are injected under.
 const BRIDGE_SCRIPT_KEY: &str = "waterui:bridge";
 
+impl WpePage {
+    /// Installs the shared bridge script and the transport adapter, ahead of any
+    /// keyed script.
+    ///
+    /// Bridge first: the adapter binds the bridge's own resolver when it runs,
+    /// before any page script can replace it, and nothing calls `__wateruiSend`
+    /// until a keyed script (the state seed) or the page does.
+    pub fn install_bridge_scripts(&self) {
+        self.add_script(
+            BRIDGE_SCRIPT_KEY,
+            waterui_webview::DOCUMENT_START_SCRIPT,
+            false,
+        );
+        self.add_script(TRANSPORT_SCRIPT_KEY, TRANSPORT_SCRIPT, false);
+    }
+}
+
 type RedirectSubscription = Option<(Computed<bool>, BoxWatcherGuard)>;
 
 /// Standard `WaterUI` `WebView` handle backed by one WPE page.
@@ -144,14 +161,7 @@ impl WpeWebViewHandle {
     /// creation-time scripts.
     #[must_use]
     pub fn new(page: WpePage, config: WebViewConfig) -> Self {
-        // Transport first: the shared script calls `__wateruiSend`, so the adapter
-        // onto WPE's single WebKit message handler has to exist before it runs.
-        page.add_script(TRANSPORT_SCRIPT_KEY, TRANSPORT_SCRIPT, false);
-        page.add_script(
-            BRIDGE_SCRIPT_KEY,
-            waterui_webview::DOCUMENT_START_SCRIPT,
-            false,
-        );
+        page.install_bridge_scripts();
         for script in config.user_scripts() {
             page.add_script(
                 &script.key,

@@ -284,7 +284,7 @@ mod linux {
             BridgeOrigins::Any,
             &Url::new("https://wpe-smoke.invalid/"),
         ));
-        super::bridge_smoke::install_bridge_scripts(&page);
+        page.install_bridge_scripts();
         page.add_handler(
             "json",
             Box::new(|_| Box::pin(async { Ok(JsReply::Json(br#"{"answer":42}"#.to_vec())) })),
