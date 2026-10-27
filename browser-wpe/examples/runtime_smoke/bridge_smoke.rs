@@ -235,23 +235,8 @@ fn serve_request(
     let _ = stream.flush();
 }
 
-/// Installs the WPE transport and the shared bridge script, as the WPE web view
-/// controller does.
-pub fn install_bridge_scripts(page: &SmokePage) {
-    page.add_script(
-        "waterui:wpe-transport",
-        include_str!("../../src/transport.js"),
-        false,
-    );
-    page.add_script(
-        "waterui:bridge",
-        waterui_webview::DOCUMENT_START_SCRIPT,
-        false,
-    );
-}
-
 fn install_bridge(page: &SmokePage) {
-    install_bridge_scripts(page);
+    page.install_bridge_scripts();
     page.add_script(
         "waterui:wpe-smoke-observer",
         r#"
@@ -550,12 +535,9 @@ pub fn run(runtime: &WpeRuntime, executor: &SmokeExecutor, deadline: Instant) {
     let rejected_after_swap = await_page_script(
         &page,
         r#"
-          const originalResolve = globalThis.__wateruiResolve;
           globalThis.__wateruiSpoofResolverCalls = 0;
-          globalThis.__wateruiResolve = function (id, ok, payload) {
+          globalThis.__wateruiResolve = function () {
             globalThis.__wateruiSpoofResolverCalls += 1;
-            fetch("/marker?tag=spoof-resolver-invoked", {cache: "no-store"}).catch(() => {});
-            return originalResolve(id, ok, payload);
           };
           let result = "resolved";
           try {
@@ -568,9 +550,13 @@ pub fn run(runtime: &WpeRuntime, executor: &SmokeExecutor, deadline: Instant) {
         "#,
         deadline,
     );
+    // The refusal settles the call through the resolver the transport bound at
+    // document start; the page's replacement never hears from the host.
     assert_eq!(rejected_after_swap["result"], "rejected");
-    assert_eq!(rejected_after_swap["calls"], 1);
-    server.wait_for_tag(&page, "spoof-resolver-invoked", deadline);
+    assert_eq!(
+        rejected_after_swap["calls"], 0,
+        "the transport handed E's refusal to E's replacement resolver"
+    );
     server.wait_for_tag(&page, "E-after-navigation-rejected", deadline);
 
     release_reply
@@ -595,7 +581,7 @@ pub fn run(runtime: &WpeRuntime, executor: &SmokeExecutor, deadline: Instant) {
     );
     assert_eq!(after_reply_roundtrip["host"], format!("localhost:{port}"));
     assert_eq!(
-        after_reply_roundtrip["calls"], 1,
+        after_reply_roundtrip["calls"], 0,
         "the A reply invoked E's replacement resolver"
     );
     server.wait_for_tag(&page, "E-after-reply-roundtrip", deadline);
