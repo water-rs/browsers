@@ -18,7 +18,7 @@ categories = ["gui", "web-programming"]
 # which resolves which runtime artifact to download — reads the pin belonging to
 # the exact crate version it depends on rather than keeping a copy of its own.
 [package.metadata.waterui.wpe-runtime]
-version = "2.52.5"
+version = "2.54.2"
 bridge-abi = 5
 native-source = "native"
 
