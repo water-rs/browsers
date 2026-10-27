@@ -5,9 +5,10 @@ description: >-
   Clang as CC/CXX for the rest of the job. The jammy archive stops at Clang 15,
   and apt.llvm.org is where upstream's own SDK takes newer ones from. The
   calling step's own `apt-get update` and install pick the source up; the
-  package to install is exported as CLANG_PACKAGE. The pin is read beside
-  this action, so a repository that checks browsers out under a subdirectory
-  can use it unchanged.
+  package to install is exported as CLANG_PACKAGE and the source file as
+  CLANG_APT_SOURCE, for a caller that refreshes only the sources it names.
+  The pin is read beside this action, so a repository that checks browsers
+  out under a subdirectory can use it unchanged.
 runs:
   using: composite
   steps:
@@ -18,9 +19,11 @@ runs:
         . /etc/os-release
         curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
         test "$(gpg --show-keys --with-colons /etc/apt/trusted.gpg.d/apt.llvm.org.asc | awk -F: '/^fpr:/ {print $10; exit}')" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
-        echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$major main" | sudo tee /etc/apt/sources.list.d/llvm-toolchain.list
+        source=/etc/apt/sources.list.d/llvm-toolchain.list
+        echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$major main" | sudo tee "$source"
         {
           echo "CLANG_PACKAGE=clang-$major"
           echo "CC=clang-$major"
           echo "CXX=clang++-$major"
+          echo "CLANG_APT_SOURCE=$source"
         } >> "$GITHUB_ENV"
