@@ -711,10 +711,6 @@ fn page_teardown_disconnects_retained_emitters_and_closes_assets() {
         build_dir.as_os_str().to_owned(),
         "-DCMAKE_BUILD_TYPE=Release".into(),
         "-DWATER_WPE_BUILD_LIFETIME_TEST=ON".into(),
-        // The packaged `.pc` files name the prefix WebKit was built at, which a
-        // relocated runtime no longer has; `--define-prefix` derives it from
-        // where each file is staged, as any consumer of the runtime must.
-        "-DPKG_CONFIG_ARGN=--define-prefix".into(),
         format!("-DWATER_WPE_TEST_RUNTIME_ROOT={}", paths.root().display()).into(),
         format!("-DWATER_WPE_TEST_OUTPUT_NAME={output_name}").into(),
     ]);
