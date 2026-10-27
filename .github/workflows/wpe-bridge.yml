@@ -10,8 +10,9 @@ name: WPE Bridge
 #
 # This job compiles the bridge on a pull request in minutes, against a runtime
 # that dispatch already published. It builds nothing itself: the WPE runtime is
-# whatever the last real-engine run packaged, downloaded from the `wpe-runtime`
-# prerelease that workflow uploads to (#31). It installs the just-built bridge
+# whatever a real-engine run packaged, downloaded from the
+# `wpe-runtime-<version>-<identity>` prerelease that workflow publishes. It
+# installs the just-built bridge
 # over that prefix and runs the engine's real-engine and runtime-smoke tests —
 # so a pull request gets runtime verification in minutes without rebuilding
 # WebKit. It is not a substitute for that workflow: packaging and publishing
@@ -70,16 +71,17 @@ jobs:
             libxkbcommon-dev mesa-vulkan-drivers libvulkan1 \
             bubblewrap xdg-dbus-proxy
 
-      # The packaged runtime `wpe-real-engine.yml` publishes, under that
-      # workflow's own naming: `wpe-runtime-<version>-<os>-<arch>-<hash>.zip`,
-      # where the hash covers `runtime/**` and `native/**`. The prefix inside
-      # it does not depend on `native/**` — the bridge is a single shared
-      # object beside WebKit's, and nothing here reads it — while the hash
-      # does, so a pull request that touches the bridge (which is every pull
-      # request this job exists for) misses the exact name by construction.
-      # The exact asset is taken when it exists, and otherwise the newest one
-      # for the pinned version on this platform: any packaging of that release
-      # holds the headers and libraries the bridge compiles against.
+      # The packaged runtime `wpe-real-engine.yml` publishes, one prerelease per
+      # identity: `wpe-runtime-<version>-<identity>`, where the identity
+      # (`runtime/identity.py`) covers `runtime/**` and `native/**` among
+      # others. The prefix inside it does not depend on `native/**` — the
+      # bridge is a single shared object beside WebKit's, and nothing here
+      # reads it — while the identity does, so a pull request that touches the
+      # bridge (which is every pull request this job exists for) misses the
+      # exact release by construction. The exact release is taken when it
+      # exists, and otherwise the newest one for the pinned version: any
+      # packaging of that release holds the headers and libraries the bridge
+      # compiles against.
       #
       # Skipping when none exists would leave a green check over a bridge
       # nobody compiled, which is the state this job exists to end.
@@ -90,19 +92,17 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' browser-wpe/runtime/source.toml)"
           test -n "$version"
-          prefix="wpe-runtime-$version-${{ runner.os }}-${{ runner.arch }}-"
-          exact="${prefix}${{ hashFiles('browser-wpe/runtime/**', 'browser-wpe/native/**') }}.zip"
+          prefix="wpe-runtime-$version-"
+          exact="$prefix$(browser-wpe/runtime/identity.py)"
           # shellcheck disable=SC2016 # `$exact` and `$prefix` are jq's, bound by --arg
-          asset="$(gh release view wpe-runtime --json assets 2>/dev/null \
+          tag="$(gh release list --exclude-drafts --limit 1000 --json tagName,createdAt \
             | jq -r --arg exact "$exact" --arg prefix "$prefix" \
-              '(.assets | map(select(.name == $exact))) + (.assets | map(select(.name | startswith($prefix))) | sort_by(.updatedAt) | reverse) | .[0].name // empty' \
-            || true)"
-          if [[ -z "$asset" ]]; then
-            echo "::error::The wpe-runtime release holds no ${prefix}*.zip, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and publishes the runtime, and every later run of this job downloads it in seconds."
+              'map(select(.tagName == $exact)) + (map(select(.tagName | startswith($prefix))) | sort_by(.createdAt) | reverse) | .[0].tagName // empty')"
+          if [[ -z "$tag" ]]; then
+            echo "::error::No ${prefix}* release exists, so there is no WPE prefix to compile the bridge against. Run the 'WPE Real Engine' workflow once (Actions -> WPE Real Engine -> Run workflow); it builds and publishes the runtime, and every later run of this job downloads it in seconds."
             exit 1
           fi
-          mkdir -p runtime-artifacts
-          gh release download wpe-runtime --pattern "$asset" --dir runtime-artifacts
+          gh release download "$tag" --pattern "waterui-wpe-$version-linux-$(uname -m).zip" --dir runtime-artifacts
 
       # WebKit writes its pkg-config files with `libdir=@LIB_INSTALL_DIR@`, and
       # `Source/cmake/OptionsWPE.cmake` sets that to `CMAKE_INSTALL_FULL_LIBDIR`
