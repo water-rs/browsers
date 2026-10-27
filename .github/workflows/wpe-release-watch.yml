@@ -1,0 +1,34 @@
+name: WPE Release Watch
+
+# The pin in `browser-wpe/runtime/source.toml` moves only through a reviewed
+# change, so a new upstream release or security advisory stays invisible until
+# someone stumbles on it — it once fell three releases and two advisories
+# behind unnoticed (#61). Once a week, and on demand, this job compares the
+# pin with wpewebkit.org and keeps a single issue current with whatever the
+# pin is behind on. The bump itself — new digests and the multi-hour runtime
+# build — still goes through a pull request.
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  schedule:
+    - cron: "42 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: wpe-release-watch
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: Check for newer WPE WebKit releases and advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the pin with wpewebkit.org
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/wpe-release-watch.py

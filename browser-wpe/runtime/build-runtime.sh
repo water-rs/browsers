@@ -138,6 +138,7 @@ smoke_binary="$target_directory/debug/examples/runtime_smoke"
 snapshot="$output_directory/wpe-smoke-$version-linux-$architecture.png"
 metrics="$output_directory/wpe-smoke-$version-linux-$architecture.json"
 python3 "$runtime_directory/run-smoke.py" \
+    --archive "$output_directory/waterui-wpe-$version-linux-$architecture.zip" \
     --binary "$smoke_binary" \
     --runtime "$output_directory/wpe-runtime-$version-linux-$architecture" \
     --snapshot "$snapshot" \
