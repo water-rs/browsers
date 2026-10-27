@@ -30,6 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -103,8 +105,15 @@ jobs:
       # real-engine target with `-D warnings`, and the `MSRV` job checks it.
       - name: Test the WPE surfaces
         run: cargo nextest run -p waterui-browser-wpe --all-targets --features runtime-smoke --no-tests warn
-      - name: Compile the CEF backend without its binary distribution
-        run: cargo check -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview
+      # The Lint job runs on Linux, which compiles the `cfg(target_os =
+      # "macos")` and `cfg(windows)` code of the CEF crate away; these passes
+      # are its only lint coverage. On Linux the Lint job runs both.
+      - name: Clippy the CEF runtime surfaces
+        if: runner.os != 'Linux'
+        run: cargo clippy -p waterui-browser-cef --all-targets --features chromium,real-engine -- -D warnings
+      - name: Clippy the CEF backend without its binary distribution
+        if: runner.os != 'Linux'
+        run: cargo clippy -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview -- -D warnings
 
   lint:
     name: Lint

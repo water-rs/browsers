@@ -149,7 +149,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: wpe-work
-          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh', 'browser-wpe/runtime/compiler.sh') }}
 
       # The smoke this script ends with has crashed in a way that only happens
       # at full speed, which is exactly what a debugger perturbs away, so the
@@ -166,15 +166,15 @@ jobs:
           ulimit -c unlimited
           browser-wpe/runtime/build-runtime.sh runtime-artifacts
 
-      # `webkit-build-identity` is written by `build-runtime.sh` once the
-      # install prefix holds a complete build, so this saves the WebKit half
-      # exactly when there is one to save — including after a later step failed.
+      # `build-webkit.sh` writes its completion marker into the install prefix
+      # once it holds a complete build, so this saves the WebKit half exactly
+      # when there is one to save — including after a later step failed.
       - name: Save the WPE WebKit build
-        if: always() && steps.webkit.outputs.cache-hit != 'true' && hashFiles('wpe-work/webkit-build-identity') != ''
+        if: always() && steps.webkit.outputs.cache-hit != 'true' && hashFiles('wpe-work/runtime/.webkit-installed-*') != ''
         uses: actions/cache/save@v4
         with:
           path: wpe-work
-          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-runtime.sh') }}
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh', 'browser-wpe/runtime/compiler.sh') }}
 
       # The durable copy, written. One prerelease holds every packaged runtime,
       # each asset named for its identity, so a later run — on any branch —
