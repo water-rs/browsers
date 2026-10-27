@@ -29,6 +29,20 @@
 //! is what it leaves behind. Unpacking that archive is also what `water package`
 //! does, so `WATERUI_WPE_RUNTIME` names exactly the layout
 //! [`WpeRuntimePaths::packaged`] resolves next to a shipped executable.
+//!
+//! # Why there is no libtest harness
+//!
+//! `WpeRuntime` is a main-thread runtime: the thread that creates it is
+//! `WebKit`'s UI thread, and `WebKit` asserts as much when it tears down. libtest
+//! runs every `#[test]` body on a thread it spawns, so a test could never
+//! honour that contract; the process's `exit()` then finalizes `WebKit`'s
+//! network session on the main thread while the runtime was made on another,
+//! and the engine aborts. The target is `harness = false` and `main` below
+//! runs the checks with `libtest-mimic`, pinned to one test thread, which it
+//! runs inline on the calling thread: the process main thread. Each check
+//! still gets a process of its own from `cargo nextest run`, which lists the
+//! checks and runs one per process, so a runtime is never created twice in
+//! one process.
 #![cfg(target_os = "linux")]
 
 use std::cell::RefCell;
@@ -42,6 +56,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use executor_core::LocalExecutor;
 use executor_core::async_executor::AsyncLocalExecutor;
+use libtest_mimic::{Arguments, Trial};
 use serde_json::Value;
 use tiny_http::{Header, Response, Server};
 use waterui_browser_wpe::{WpePage, WpeRuntime, WpeRuntimePaths, WpeWebViewHandle};
@@ -49,7 +64,8 @@ use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, WatcherGuard, WebViewEvent, WebViewHandle as _,
+    ScriptMessageHandler, UserScript, WatcherGuard, WebViewConfig, WebViewEvent,
+    WebViewHandle as _,
 };
 
 /// Names the staged WPE runtime root these tests drive.
@@ -101,6 +117,57 @@ impl LocalExecutor for TestExecutor {
     }
 }
 
+/// Raises `GLib` `g_critical` to a trap for the life of one test, restored
+/// when it drops. The library mapping the symbol lives in the scope, so the
+/// stored pointer outlives every call into it.
+struct GlibCriticalScope {
+    _library: libloading::Library,
+    set: unsafe extern "C" fn(u32) -> u32,
+    previous: u32,
+}
+
+impl GlibCriticalScope {
+    fn new(paths: &WpeRuntimePaths) -> Self {
+        const G_LOG_LEVEL_CRITICAL: u32 = 1 << 3;
+        // SAFETY: the library is the runtime's own glib; the symbol is the
+        // documented `g_log_set_always_fatal` C ABI, and `_library` keeps the
+        // mapping alive past every call.
+        let library = unsafe {
+            libloading::Library::new(paths.root().join("lib/libglib-2.0.so.0"))
+                .expect("the staged runtime carries libglib-2.0")
+        };
+        // SAFETY: `g_log_set_always_fatal` has the C signature (GLogLevelFlags
+        // -> GLogLevelFlags), both of which are u32 on this ABI.
+        let set = unsafe {
+            *library
+                .get::<unsafe extern "C" fn(u32) -> u32>(b"g_log_set_always_fatal\0")
+                .expect("glib exports g_log_set_always_fatal")
+        };
+        // SAFETY: `set` points into the retained library and takes the mask
+        // by value, exactly as the C prototype declares. The first call reads
+        // the previous mask out; the second installs the OR'd set so fatal
+        // flags a host already carried stay set.
+        let previous = unsafe {
+            let previous = set(G_LOG_LEVEL_CRITICAL);
+            set(previous | G_LOG_LEVEL_CRITICAL);
+            previous
+        };
+        Self {
+            _library: library,
+            set,
+            previous,
+        }
+    }
+}
+
+impl Drop for GlibCriticalScope {
+    fn drop(&mut self) {
+        // SAFETY: `Drop` runs before the `_library` field is released, so
+        // the pointer is still valid for the restore.
+        unsafe { (self.set)(self.previous) };
+    }
+}
+
 /// One WPE runtime, one page, and the server the page is loaded from.
 struct RealEngine {
     server: Server,
@@ -113,6 +180,9 @@ struct RealEngine {
     echoed: Rc<RefCell<Option<Value>>>,
     /// Dropping this unsubscribes, and every wait below is on an event.
     _events: WatcherGuard,
+    /// Declared last: it restores the fatal mask only after every engine
+    /// field above has dropped.
+    _criticals: GlibCriticalScope,
 }
 
 impl core::fmt::Debug for RealEngine {
@@ -150,6 +220,10 @@ fn runtime_paths() -> WpeRuntimePaths {
 impl RealEngine {
     /// Starts the server, initializes the runtime and opens one page.
     fn start() -> Self {
+        // Criticals go fatal before any runtime work starts, and the scope
+        // restores the mask only after every engine field has dropped.
+        let paths = runtime_paths();
+        let criticals = GlibCriticalScope::new(&paths);
         let server = Server::http("127.0.0.1:0").expect("bind the local page server");
         let address = server
             .server_addr()
@@ -162,26 +236,33 @@ impl RealEngine {
 
         // The runtime is kept so one test can start its message pump; every
         // other test drives the loop by hand from `step`.
-        let runtime = WpeRuntime::initialize(&runtime_paths());
+        let runtime = WpeRuntime::initialize(&paths);
         let page = WpePage::new(runtime.clone());
         // A viewport the engine would lay a document out in; the default is the
         // one-pixel toplevel the bridge creates a view with.
         page.resize(1024, 768, 1.0);
         // Exactly what `WpeController::open` builds: the handle installs the
         // transport adapter and the shared document-start bridge script.
-        let handle = WpeWebViewHandle::new(page);
         // And what the framework does next, which a handle built by hand does
         // not get: every registered handler is a capability, so the backend
         // denies a document it cannot authenticate — and with no policy at all
         // that is every document, silently, from the page's point of view. An
         // application opened at this URL is granted its own origin, which is
-        // what `BridgeOrigins::Initial` means.
-        handle.set_bridge_origins(OriginPolicy::new(
+        // what `BridgeOrigins::Initial` means — handed in the same way
+        // `WpeController::open` hands it, through the view's config.
+        let mut config = WebViewConfig::default();
+        config.scripts = vec![UserScript::new(
+            "waterui:test-state-seed",
+            STATE_SEED_JS,
+            ScriptInjectionTime::DocumentStart,
+        )];
+        config.bridge_origins = OriginPolicy::new(
             BridgeOrigins::Initial,
             &base
                 .parse()
                 .expect("the local page server address is a URL"),
-        ));
+        );
+        let handle = WpeWebViewHandle::new(page, config);
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({
@@ -230,12 +311,6 @@ impl RealEngine {
             })
         });
 
-        handle.inject_script(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        );
-
         Self {
             server,
             base,
@@ -246,6 +321,7 @@ impl RealEngine {
             reports,
             echoed,
             _events: guard,
+            _criticals: criticals,
         }
     }
 
@@ -403,7 +479,6 @@ fn text<'a>(record: &'a Value, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("the page's `{name}` is not text; it recorded {record}"))
 }
 
-#[test]
 fn navigation_reaches_each_url_and_history_moves_both_ways() {
     let engine = RealEngine::start();
 
@@ -438,7 +513,6 @@ fn navigation_reaches_each_url_and_history_moves_both_ways() {
 /// fixture's own `location` reader has to guess which it got. The engine's
 /// `jsc_value_to_json` is what encodes it, so a string arrives quoted and an
 /// object arrives as an object.
-#[test]
 fn the_raw_evaluation_path_answers_with_json() {
     let engine = RealEngine::start();
     engine.open("/first");
@@ -455,7 +529,6 @@ fn the_raw_evaluation_path_answers_with_json() {
 /// longer tell them apart. `await waterui.invoke(...)` then resolved to base64
 /// text, which is a string of the right type and entirely the wrong value —
 /// so the type alone is not the assertion, the value is.
-#[test]
 fn a_handler_reply_reaches_the_page_as_its_value_and_not_as_base64() {
     let engine = RealEngine::start();
     let record = engine.open("/first");
@@ -476,7 +549,6 @@ fn a_handler_reply_reaches_the_page_as_its_value_and_not_as_base64() {
 /// entire mirrored-state feature was unreachable from JavaScript for the whole
 /// life of the feature. Reading a seeded key back is the part that proves the
 /// mirror is wired rather than merely present.
-#[test]
 fn the_page_can_reach_the_whole_waterui_object() {
     let engine = RealEngine::start();
     let record = engine.open("/first");
@@ -498,7 +570,6 @@ fn the_page_can_reach_the_whole_waterui_object() {
 /// their low bits silently and symmetrically: a value seeded into a page read
 /// back rounded, and a page that returned the value it was given returned the
 /// rounded one. Both ends looked correct the whole time.
-#[test]
 fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways() {
     let engine = RealEngine::start();
     let record = engine.open("/first");
@@ -545,7 +616,6 @@ fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways() {
 /// So this test never touches the engine's loop: it serves the page, ticks the
 /// executor, and everything WPE gets done is done by the message pump task.
 /// Without that task nothing is iterated at all and the page does not even load.
-#[test]
 fn a_background_timer_reaches_the_bridge_without_input_or_rendering() {
     let engine = RealEngine::start();
     engine.handle.inject_script(
@@ -572,4 +642,128 @@ fn a_background_timer_reaches_the_bridge_without_input_or_rendering() {
         "fired",
         "the timer reported without having applied its DOM mutation"
     );
+}
+
+/// The page-callback lifetime fixture: builds the whitebox shared object the
+/// native `CMake` option produces, loads it against this process's staged
+/// runtime, and runs the deterministic ownership assertions inside it.
+///
+/// No `RealEngine`, no `WpeRuntime` — loading the bridge twice would register
+/// its private `GTypes` again, so the fixture runs in this isolated test
+/// process instead.
+fn page_teardown_disconnects_retained_emitters_and_closes_assets() {
+    let paths = runtime_paths();
+    let _criticals = GlibCriticalScope::new(&paths);
+    let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("native");
+    let build_dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("wpe-lifetime-build-{}", std::process::id()));
+    let output_name = format!("wpe_lifetime_test_{}", std::process::id());
+    let pkg_config_path = std::env::join_paths(
+        [
+            paths.root().join("lib/pkgconfig"),
+            paths.root().join("share/pkgconfig"),
+        ]
+        .into_iter()
+        .chain(
+            std::env::var_os("PKG_CONFIG_PATH")
+                .as_deref()
+                .map(std::env::split_paths)
+                .into_iter()
+                .flatten(),
+        ),
+    )
+    .expect("the scoped pkg-config path joins");
+
+    // Both `CMake` invocations share one budget; `timeout` bounds the whole
+    // process group so a wedged configure cannot hang the test.
+    let deadline = Instant::now() + TIMEOUT;
+    let run = |args: &[std::ffi::OsString]| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the lifetime fixture build ran out of budget"
+        );
+        let seconds = remaining.as_secs().max(1);
+        let output = std::process::Command::new("timeout")
+            .arg("--kill-after=5s")
+            .arg(format!("{seconds}s"))
+            .arg("cmake")
+            .args(args)
+            .env("PKG_CONFIG_PATH", &pkg_config_path)
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => panic!("cmake could not run: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "cmake failed for the lifetime fixture (status {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run(&[
+        "-S".into(),
+        native.as_os_str().to_owned(),
+        "-B".into(),
+        build_dir.as_os_str().to_owned(),
+        "-DCMAKE_BUILD_TYPE=Release".into(),
+        "-DWATER_WPE_BUILD_LIFETIME_TEST=ON".into(),
+        format!("-DWATER_WPE_TEST_RUNTIME_ROOT={}", paths.root().display()).into(),
+        format!("-DWATER_WPE_TEST_OUTPUT_NAME={output_name}").into(),
+    ]);
+    run(&[
+        "--build".into(),
+        build_dir.as_os_str().to_owned(),
+        "--target".into(),
+        "wpe_lifetime_test".into(),
+    ]);
+
+    // The fixture is loaded for the rest of the process — its embedded copy
+    // of the bridge registers private `GTypes` that keep code pointers, so
+    // the library must stay mapped like the production bridge does.
+    let library = std::mem::ManuallyDrop::new(unsafe {
+        // SAFETY: the fixture's path is inside the staged runtime root this
+        // test built it into.
+        libloading::Library::new(paths.root().join(format!("lib/lib{output_name}.so")))
+            .expect("the lifetime fixture loads")
+    });
+    unsafe {
+        // SAFETY: the fixture's sole export is a `void(void)` entry the C
+        // file defines; the library stays mapped for the process's life.
+        let entry = library
+            .get::<unsafe extern "C" fn()>(b"water_wpe_test_page_callback_lifetime\0")
+            .expect("the lifetime fixture exports its entry point");
+        entry();
+    }
+}
+
+fn main() {
+    let mut args = Arguments::from_args();
+    // libtest-mimic runs trials inline on the calling thread only when it is
+    // told to use a single thread. That thread is the process main thread,
+    // which `WpeRuntime` requires; any other count spawns workers.
+    args.test_threads = Some(1);
+    // Each trial is named after the function it runs, as the `#[test]` it
+    // replaced was, so nextest filters and CI history keep matching.
+    macro_rules! trials {
+        ($($check:ident),* $(,)?) => {
+            vec![$(Trial::test(stringify!($check), || {
+                $check();
+                Ok(())
+            })),*]
+        };
+    }
+    let trials = trials![
+        navigation_reaches_each_url_and_history_moves_both_ways,
+        the_raw_evaluation_path_answers_with_json,
+        a_handler_reply_reaches_the_page_as_its_value_and_not_as_base64,
+        the_page_can_reach_the_whole_waterui_object,
+        integers_beyond_two_to_the_fifty_third_cross_intact_both_ways,
+        a_background_timer_reaches_the_bridge_without_input_or_rendering,
+        page_teardown_disconnects_retained_emitters_and_closes_assets,
+    ];
+    libtest_mimic::run(&args, trials).exit();
 }

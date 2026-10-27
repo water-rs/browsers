@@ -4,10 +4,12 @@
 //! that the framework exports those entry points at the declared signatures.
 //! `libloading` keeps the framework mapped for as long as the `Library` lives.
 
+use async_channel::{Receiver, TryRecvError, unbounded};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 use cef::args::Args;
@@ -22,6 +24,26 @@ use crate::app::new_app;
 #[cfg(any(feature = "chromium", feature = "webview"))]
 use crate::page::CefController;
 
+/// How long the pump may go without hearing from Chromium before running anyway.
+///
+/// Pacing otherwise comes from Chromium: it calls `OnScheduleMessagePumpWork`
+/// with the delay it wants — measured on an idle page, only ever 0 ms or 83 ms —
+/// and [`CefRuntime::start_message_pump`] wakes on that request even mid-sleep.
+///
+/// This interval is not a free parameter. `do_message_loop_work` is a
+/// variable-cost call on the UI thread, and how often it runs decides how much
+/// work each call has to drain, so both directions are worse. Measured on
+/// `examples/chromium` with the page idle after its first accelerated paint,
+/// counting main-thread polls that reached the frame-budget warning threshold:
+///
+/// | interval | over-budget polls | worst poll |
+/// |---|---|---|
+/// | 8 ms | 20.2 / min | 654 ms |
+/// | 33 ms | 5.8 / min | 10 ms |
+/// | 1 s | 7.7 / min | 15 ms |
+///
+/// Pumping more often multiplies the fixed cost of the call; pumping less often
+/// hands each call a bigger backlog. Change this only against a new measurement.
 const MAXIMUM_PUMP_INTERVAL: Duration = Duration::from_millis(1000 / 30);
 
 #[derive(Deserialize)]
@@ -84,25 +106,63 @@ impl Drop for PlatformSandbox {
     }
 }
 
-/// Neither Linux nor Windows passes a sandbox object through the CEF API.
+/// The sandbox information object CEF's bootstrap launcher created for this
+/// process.
 ///
-/// Linux never had one to pass: Chromium's own namespace or setuid sandbox
-/// isolates the child processes and `sandbox_info` is null.
+/// CEF no longer ships a static `cef_sandbox` library for Windows: a renamed
+/// `bootstrap.exe` (`/SUBSYSTEM:WINDOWS`) or `bootstrapc.exe`
+/// (`/SUBSYSTEM:CONSOLE`) from the distribution is the application executable.
+/// It creates the sandbox information object itself and delivers it to the
+/// application DLL through the `RunWinMain`/`RunConsoleMain` entry points
+/// exported by [`cef_bootstrap_main!`](crate::cef_bootstrap_main). That macro
+/// calls [`install_bootstrap_sandbox_info`] first; an application exporting the
+/// entry points by hand must do the same before any other CEF call.
 ///
-/// Windows no longer has one an executable can build. CEF 150 creates the
-/// sandbox inside its own `bootstrap.exe` / `bootstrapc.exe` and hands it to a
-/// client DLL through the `RunWinMain` / `RunConsoleMain` that DLL exports; no
-/// windows64 distribution of this release ships the `cef_sandbox.lib` that used
-/// to implement `cef_sandbox_info_create`, and `libcef.dll` does not export it
-/// either. Every test binary here — and every `water`-built Windows application
-/// until it is packaged as such a client DLL — is an ordinary executable, so it
-/// has nothing to pass, and says so through `no_sandbox` in
-/// [`CefRuntime::initialize`] rather than passing null while claiming to be
-/// sandboxed. Restoring it is water-rs/browsers#17.
-#[cfg(not(target_os = "macos"))]
+/// The launcher owns the object and keeps it alive for the whole entry-point
+/// call — which spans the application's lifetime — so the pointer is only
+/// borrowed here and is never destroyed.
+#[cfg(target_os = "windows")]
+static BOOTSTRAP_SANDBOX_INFO: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Installs the sandbox information object delivered by the bootstrap
+/// launcher. See [`BOOTSTRAP_SANDBOX_INFO`] for the process model.
+///
+/// # Panics
+///
+/// Panics when `sandbox_info` is null.
+#[cfg(target_os = "windows")]
+pub fn install_bootstrap_sandbox_info(sandbox_info: *mut std::ffi::c_void) {
+    assert!(
+        !sandbox_info.is_null(),
+        "CEF bootstrap launcher delivered a null sandbox information object"
+    );
+    BOOTSTRAP_SANDBOX_INFO.store(sandbox_info, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "windows")]
+struct PlatformSandbox(std::ptr::NonNull<std::ffi::c_void>);
+
+#[cfg(target_os = "windows")]
+impl PlatformSandbox {
+    fn initialize(_paths: &CefRuntimePaths, _args: &cef::MainArgs) -> Self {
+        let sandbox_info = BOOTSTRAP_SANDBOX_INFO.load(Ordering::Relaxed);
+        Self(std::ptr::NonNull::new(sandbox_info).expect(
+            "CEF sandbox information is missing: on Windows the application must \
+             be a DLL entered through the renamed `bootstrap.exe`/`bootstrapc.exe` \
+             launcher; export the entry points with \
+             `waterui_browser_cef::cef_bootstrap_main!`",
+        ))
+    }
+
+    const fn info(&self) -> *mut u8 {
+        self.0.as_ptr().cast()
+    }
+}
+
+#[cfg(target_os = "linux")]
 struct PlatformSandbox;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 impl PlatformSandbox {
     const fn initialize(_paths: &CefRuntimePaths, _args: &cef::MainArgs) -> Self {
         Self
@@ -334,6 +394,7 @@ impl CefRuntimePaths {
 
 /// Configuration required to initialize a sandboxed CEF runtime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CefRuntimeConfiguration {
     /// Staged runtime layout.
     pub paths: CefRuntimePaths,
@@ -420,7 +481,18 @@ struct CefBootstrap {
 
 fn bootstrap(paths: &CefRuntimePaths) -> Result<CefBootstrap, i32> {
     let args = Args::new();
+    // The sandbox must start at process entry (see `initialize_sandbox_early`);
+    // packaged apps install it there and this reuses it — helper subprocesses
+    // and tests reach `bootstrap` first and initialize it here instead.
+    #[cfg(target_os = "macos")]
+    let sandbox = EARLY_SANDBOX
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_else(|| PlatformSandbox::initialize(paths, args.as_main_args()));
+    #[cfg(not(target_os = "macos"))]
     let sandbox = PlatformSandbox::initialize(paths, args.as_main_args());
+    #[cfg(target_os = "windows")]
+    let sandbox_info = sandbox.info();
+    #[cfg(not(target_os = "windows"))]
     let sandbox_info = PlatformSandbox::info();
     let library = LoadedCefLibrary::load(&paths.library());
     let hash = api_hash(sys::CEF_API_VERSION_LAST, 0);
@@ -429,7 +501,7 @@ fn bootstrap(paths: &CefRuntimePaths) -> Result<CefBootstrap, i32> {
         "loaded CEF runtime has no compatible API hash"
     );
 
-    let (schedule, pump_requests) = channel();
+    let (schedule, pump_requests) = unbounded();
     let mut app = new_app(schedule);
     let subprocess_exit = execute_process(Some(args.as_main_args()), Some(&mut app), sandbox_info);
     if subprocess_exit >= 0 {
@@ -443,6 +515,36 @@ fn bootstrap(paths: &CefRuntimePaths) -> Result<CefBootstrap, i32> {
         app,
         pump_requests,
     })
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static EARLY_SANDBOX: std::cell::RefCell<Option<PlatformSandbox>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Initializes the CEF sandbox at process entry on macOS.
+///
+/// `cef_sandbox_initialize` creates the seatbelt sandbox server; once other
+/// frameworks have claimed parts of the process bootstrap state it fails and
+/// returns null, so it must run before `NSApplication` and the backend's
+/// executors — the packaged entry point calls this first. `bootstrap`
+/// reuses the sandbox this installs.
+///
+/// # Panics
+///
+/// Panics when the packaged runtime is malformed or the sandbox cannot start.
+#[cfg(target_os = "macos")]
+pub fn initialize_sandbox_early() {
+    let paths = CefRuntimePaths::packaged();
+    paths.validate();
+    let args = Args::new();
+    EARLY_SANDBOX.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PlatformSandbox::initialize(&paths, args.as_main_args()));
+        }
+    });
 }
 
 /// Executes one CEF subprocess from the packaged helper application.
@@ -496,11 +598,9 @@ impl core::fmt::Debug for CefRuntime {
 impl CefRuntime {
     /// Loads, validates, executes subprocess dispatch, and initializes CEF.
     ///
-    /// CEF's OS sandbox remains enabled on macOS and Linux: a missing helper or
-    /// malformed runtime fails during CEF initialization instead of silently
-    /// disabling isolation. Windows runs without it, because CEF 150 offers no
-    /// sandbox to an executable; see [`PlatformSandbox`] and
-    /// water-rs/browsers#17.
+    /// CEF's OS sandbox remains enabled. A missing helper or malformed runtime
+    /// therefore fails during CEF initialization instead of silently disabling
+    /// isolation.
     ///
     /// # Panics
     ///
@@ -533,6 +633,9 @@ impl CefRuntime {
         } = bootstrap(&paths).unwrap_or_else(|exit_code| {
             std::process::exit(exit_code);
         });
+        #[cfg(target_os = "windows")]
+        let sandbox_info = sandbox.info();
+        #[cfg(not(target_os = "windows"))]
         let sandbox_info = PlatformSandbox::info();
 
         let resources = paths.resources();
@@ -552,18 +655,8 @@ impl CefRuntime {
             .to_string_lossy()
             .as_ref()
             .into();
-        // Windows is the one platform with no sandbox object to give CEF: this
-        // release ships `cef_sandbox.lib` in no windows64 distribution and
-        // builds the sandbox inside `bootstrap.exe` for client DLLs instead, so
-        // an executable declares the configuration it is actually in rather
-        // than passing null underneath `no_sandbox: 0`. water-rs/browsers#17
-        // restores it by packaging the application as such a DLL.
-        #[cfg(target_os = "windows")]
-        let no_sandbox = 1;
-        #[cfg(not(target_os = "windows"))]
-        let no_sandbox = 0;
         let settings = Settings {
-            no_sandbox,
+            no_sandbox: 0,
             browser_subprocess_path,
             windowless_rendering_enabled: 1,
             external_message_pump: 1,
@@ -587,7 +680,7 @@ impl CefRuntime {
                 sandbox_info,
             ),
             1,
-            "CEF initialization failed for runtime {}",
+            "CEF initialization failed with sandbox enabled and runtime {}",
             paths.root().display()
         );
 
@@ -617,7 +710,7 @@ impl CefRuntime {
             match self.inner.pump_requests.try_recv() {
                 Ok(deadline) => requested = Some(deadline.instant()),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
+                Err(TryRecvError::Closed) => {
                     panic!("CEF browser-process message pump disconnected")
                 }
             }
@@ -657,6 +750,7 @@ impl CefRuntime {
             return;
         }
         let runtime = Rc::downgrade(&self.inner);
+        let requests = self.inner.pump_requests.clone();
         executor_core::spawn_local(async move {
             loop {
                 let Some(inner) = runtime.upgrade() else {
@@ -665,7 +759,24 @@ impl CefRuntime {
                 // The strong reference must not be held across the await, or
                 // this task would keep CEF alive for the life of the process.
                 let deadline = Self { inner }.pump().instant();
-                futures_timer::Delay::new(deadline.saturating_duration_since(Instant::now())).await;
+                let sleep = async {
+                    futures_timer::Delay::new(deadline.saturating_duration_since(Instant::now()))
+                        .await;
+                    None
+                };
+                // Sleeping out the whole deadline would ignore a request that
+                // arrives during it, and Chromium asks for an immediate pump
+                // the moment it has work — which is every frame of an
+                // animating page. That is what capped a page at the idle
+                // ceiling and made the render callback pump to make up for it.
+                let requested =
+                    futures_lite::future::race(sleep, async { requests.recv().await.ok() }).await;
+                if let Some(requested) = requested {
+                    let Some(inner) = runtime.upgrade() else {
+                        return;
+                    };
+                    inner.next_pump.set(requested.instant());
+                }
             }
         })
         .detach();

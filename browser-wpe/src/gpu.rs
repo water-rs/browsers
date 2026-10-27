@@ -1,26 +1,16 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use std::num::NonZeroU64;
+
 use bytemuck::{Pod, Zeroable};
 use num_traits::ToPrimitive as _;
-use std::num::NonZeroU64;
-use std::rc::Rc;
-use waterui_graphics::gpu_surface::{GpuContext, GpuFrame, GpuView};
+use waterui_graphics::gpu::{Context, Frame, GpuContent, GpuContentView, RedrawHandle};
 use wgpu_external_frame::dma_buf::{DmaBufFrame, DmaBufImporter};
 
-#[cfg(feature = "webview")]
-use crate::WpePage;
-use crate::frame::{BrowserFrame, ShmFrame};
-#[cfg(feature = "webview")]
-use crate::input::{WpeInputGpuView, WpeSurfaceInput};
-
 /// The uniform block the blit pipeline binds at `@group(0) @binding(2)`.
-///
-/// It is declared twice — here and in `wpe_blit.wgsl` — and nothing at run
-/// time compares the two: wgpu validates the bound buffer against the pipeline
-/// layout, and the pipeline layout is written from this side, so a shader whose
-/// block is a different size is accepted and the fragment stage reads whichever
-/// bytes happen to sit at its own offsets. That is how a 32-byte shader block
-/// against a 16-byte host one survived long enough to need a GPU to notice
-/// (water-rs/browsers#26), so the test at the bottom of this module reflects
-/// the shader and asserts the two still agree.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameOptions {
@@ -41,6 +31,13 @@ impl FrameOptions {
     };
 }
 
+use crate::frame::{BrowserFrame, ShmFrame};
+
+#[cfg(feature = "webview")]
+use crate::WpePage;
+#[cfg(feature = "webview")]
+use crate::input::{WpeInputGpuView, WpeSurfaceInput};
+
 struct SourceTexture {
     size: (u32, u32),
     format: wgpu::TextureFormat,
@@ -58,7 +55,42 @@ struct GpuState {
     source: Option<SourceTexture>,
 }
 
-/// Source of Linux browser frames for GPU composition.
+struct Mailbox {
+    /// Browser frames the UI side drained from the source and the render side
+    /// has not yet consumed.
+    frames: VecDeque<BrowserFrame>,
+    /// The physical size and device-pixel ratio of the last rendered frame,
+    /// published to the UI side so it can keep the browser's logical viewport
+    /// in step. `(0, 0, _)` marks "no frame yet".
+    viewport: (u32, u32, f64),
+    /// The render thread's redraw handle, published once at setup so the UI
+    /// side can hand it to the frame source as its waker.
+    redraw: Option<RedrawHandle>,
+}
+
+/// Crosses the UI/render boundary both ways between [`BrowserUiBridge`] and
+/// [`BrowserGpuContent`].
+struct BrowserShared {
+    state: Mutex<Mailbox>,
+}
+
+impl BrowserShared {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(Mailbox {
+                frames: VecDeque::new(),
+                viewport: (0, 0, 1.0),
+                redraw: None,
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Mailbox> {
+        self.state.lock().expect("WPE frame mailbox poisoned")
+    }
+}
+
+/// Source of Linux browser frames for GPU-only DMA-BUF composition.
 pub trait BrowserFrameSource: 'static {
     /// Drains engine work that is ready on the current thread.
     fn pump(&self);
@@ -89,85 +121,27 @@ impl BrowserFrameSource for WpePage {
     }
 }
 
-/// GPU view that composites a Linux browser frame stream without CPU readback.
-///
-/// Both buffer kinds land in the same source texture and are blitted by the same
-/// pipeline: a dma-buf is imported, a shared-memory mapping is uploaded. See
-/// [`BrowserFrame`].
-pub struct BrowserGpuView<S> {
-    source: S,
+/// The render-side half of a DMA-BUF browser view: owns the GPU state and the
+/// newest pending frame, all `Send`.
+struct BrowserGpuContent {
+    shared: Arc<BrowserShared>,
     gpu: Option<GpuState>,
     pending_frame: Option<BrowserFrame>,
 }
 
-/// WPE-specialized GPU view.
-#[cfg(feature = "webview")]
-pub type WpeGpuView = BrowserGpuView<WpePage>;
-
-impl<S> core::fmt::Debug for BrowserGpuView<S> {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.debug_struct("WpeGpuView").finish_non_exhaustive()
-    }
-}
-
-impl<S: BrowserFrameSource> BrowserGpuView<S> {
-    /// Creates a renderer for `source`.
-    ///
-    /// The device scale comes from the frame the host draws — see
-    /// [`GpuFrame::scale`] — so nothing has to publish it separately.
-    #[must_use]
-    pub const fn new(source: S) -> Self {
-        Self {
-            source,
-            gpu: None,
-            pending_frame: None,
-        }
-    }
-
-    /// Returns the frame source.
-    #[must_use]
-    pub const fn source(&self) -> &S {
-        &self.source
-    }
-}
-
-/// Creates the presenter for one visible WPE page, wired to take its own input.
-///
-/// The view reports
-/// [`wants_input_events`](waterui_graphics::gpu_surface::GpuView::wants_input_events),
-/// so a backend that routes surface input to GPU views needs nothing
-/// WPE-specific: the pointer, keyboard, scroll and composition events landing
-/// on this layer reach `WPEPlatform` through
-/// [`WpeSurfaceInput`](crate::WpeSurfaceInput). A backend whose input arrives
-/// somewhere else entirely — GTK delivers it to the `GtkGLArea`'s event
-/// controllers — builds a [`BrowserGpuView`] and owns a `WpeSurfaceInput` beside
-/// it instead.
-#[cfg(feature = "webview")]
-#[must_use]
-pub fn gpu_view_with_input(page: WpePage) -> impl GpuView {
-    WpeInputGpuView::new(
-        BrowserGpuView::new(page.clone()),
-        WpeSurfaceInput::new(page),
-    )
-}
-
-impl<S: BrowserFrameSource> GpuView for BrowserGpuView<S> {
-    #[expect(
-        clippy::future_not_send,
-        reason = "browser GPU views and WaterUI environments are confined to the UI thread"
-    )]
-    async fn setup(&mut self, context: &GpuContext<'_>, _env: &mut waterui_core::Environment) {
-        let redraw = context.redraw_handle.clone();
-        self.source
-            .set_frame_waker(Rc::new(move || redraw.request_redraw()));
+impl GpuContent for BrowserGpuContent {
+    fn setup(&mut self, context: &Context<'_>) {
+        self.shared.lock().redraw = Some(context.redraw.clone());
         self.gpu = Some(create_gpu_state(context));
     }
 
-    fn render(&mut self, frame: &mut GpuFrame<'_>) {
-        self.source.pump();
-        resize_browser_source(&self.source, frame);
-        if self.pending_frame.is_none() {
-            self.pending_frame = self.source.take_frame();
+    fn render(&mut self, frame: &mut Frame<'_>) {
+        {
+            let mut state = self.shared.lock();
+            state.viewport = (frame.width, frame.height, f64::from(frame.scale));
+            if self.pending_frame.is_none() {
+                self.pending_frame = state.frames.pop_front();
+            }
         }
         let Some(pending) = self.pending_frame.as_ref() else {
             clear_target(frame);
@@ -186,31 +160,153 @@ impl<S: BrowserFrameSource> GpuView for BrowserGpuView<S> {
         let gpu = self
             .gpu
             .as_mut()
-            .expect("WPE GPU view rendered before setup");
+            .expect("WPE GPU content rendered before setup");
         render_browser_frame(gpu, incoming, frame);
-        if let Some(next) = self.source.take_frame() {
+        let next = self.shared.lock().frames.pop_front();
+        if let Some(next) = next {
             self.pending_frame = Some(next);
             frame.request_redraw();
         }
     }
 }
 
-fn resize_browser_source<S: BrowserFrameSource>(source: &S, frame: &GpuFrame<'_>) {
-    let scale = frame.scale();
-    let logical_width = (f64::from(frame.width) / scale)
-        .round()
-        .max(1.0)
-        .to_u32()
-        .expect("WPE logical width exceeds u32");
-    let logical_height = (f64::from(frame.height) / scale)
-        .round()
-        .max(1.0)
-        .to_u32()
-        .expect("WPE logical height exceeds u32");
-    source.resize(logical_width, logical_height, scale);
+/// The UI-thread half of a DMA-BUF browser view: drives the frame source and
+/// hands its frames to the render side.
+///
+/// `WpePage` and any other [`BrowserFrameSource`] are confined to the UI
+/// thread, so everything that touches the source lives here and only DMA-BUF
+/// frames cross.
+struct BrowserUiBridge<S> {
+    source: S,
+    shared: Arc<BrowserShared>,
+    waker_installed: bool,
 }
 
-fn render_browser_frame(gpu: &mut GpuState, incoming: BrowserFrame, frame: &GpuFrame<'_>) {
+impl<S: BrowserFrameSource> BrowserUiBridge<S> {
+    /// Runs one UI-side browser frame; call once per presented frame.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the logical viewport does not fit a `u32`.
+    fn frame(&mut self) {
+        if !self.waker_installed {
+            let redraw = self.shared.lock().redraw.take();
+            if let Some(redraw) = redraw {
+                self.source
+                    .set_frame_waker(Rc::new(move || redraw.request_redraw()));
+                self.waker_installed = true;
+            }
+        }
+        self.source.pump();
+        let (width, height, scale) = self.shared.lock().viewport;
+        if width > 0 && height > 0 {
+            let logical_width = (f64::from(width) / scale)
+                .round()
+                .max(1.0)
+                .to_u32()
+                .expect("WPE logical width exceeds u32");
+            let logical_height = (f64::from(height) / scale)
+                .round()
+                .max(1.0)
+                .to_u32()
+                .expect("WPE logical height exceeds u32");
+            self.source.resize(logical_width, logical_height, scale);
+        }
+        while let Some(next) = self.source.take_frame() {
+            self.shared.lock().frames.push_back(next);
+        }
+    }
+}
+
+/// GPU view that composites a Linux browser DMA-BUF stream without CPU
+/// readback.
+///
+/// The source stays on the UI thread — [`BrowserFrameSource`] implementations
+/// are browser engine objects — so the produced [`GpuContentView`] carries a
+/// frame hook that drives it; only the frames themselves cross to the render
+/// side.
+pub struct BrowserGpuView<S> {
+    source: S,
+}
+
+/// WPE-specialized DMA-BUF GPU view.
+#[cfg(feature = "webview")]
+pub type WpeGpuView = BrowserGpuView<WpePage>;
+
+impl<S> core::fmt::Debug for BrowserGpuView<S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_struct("WpeGpuView").finish_non_exhaustive()
+    }
+}
+
+impl<S: BrowserFrameSource> BrowserGpuView<S> {
+    /// Creates a view over `source`'s frame stream.
+    ///
+    /// The device scale comes from the frame the host draws — see
+    /// [`Frame::scale`] — so nothing has to publish it separately.
+    #[must_use]
+    pub const fn new(source: S) -> Self {
+        Self { source }
+    }
+
+    /// Returns the frame source.
+    #[must_use]
+    pub const fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// The render-side [`GpuContent`] and the UI-side bridge hook, for hosts
+    /// that drive the render loop by hand instead of through a surface.
+    ///
+    /// The hook is `GpuContentView`'s `on_frame` callback lifted out: call it
+    /// once per host frame before rendering, exactly as a hosted view's
+    /// `frame()` does.
+    pub fn into_parts(self) -> (impl GpuContent, impl Fn() + 'static) {
+        let shared = Arc::new(BrowserShared::new());
+        let content = BrowserGpuContent {
+            shared: Arc::clone(&shared),
+            gpu: None,
+            pending_frame: None,
+        };
+        let bridge = RefCell::new(BrowserUiBridge {
+            source: self.source,
+            shared,
+            waker_installed: false,
+        });
+        (content, move || bridge.borrow_mut().frame())
+    }
+
+    /// Builds the [`GpuContentView`] that composites the frame stream.
+    #[must_use]
+    pub fn into_view(self) -> GpuContentView {
+        let (content, pump) = self.into_parts();
+        GpuContentView::new(content).on_frame(pump)
+    }
+}
+
+/// Creates the presenter for one visible WPE page, wired to take its own
+/// input.
+///
+/// The view answers
+/// [`wants_input_events`](GpuContentView::wants_input_events), so a backend
+/// that routes surface input to GPU views needs nothing WPE-specific: the
+/// pointer, keyboard, scroll and composition events landing on this layer
+/// reach `WPEPlatform` through
+/// [`WpeSurfaceInput`](crate::WpeSurfaceInput). A backend whose input arrives
+/// somewhere else entirely — GTK delivers it to the `GtkGLArea`'s event
+/// controllers — builds a [`BrowserGpuView`] and owns a `WpeSurfaceInput`
+/// beside it instead.
+#[cfg(feature = "webview")]
+#[must_use]
+pub fn gpu_view_with_input(page: WpePage) -> GpuContentView {
+    WpeInputGpuView::new(
+        BrowserGpuView::new(page.clone()).into_view(),
+        WpeSurfaceInput::new(page),
+    )
+    .into_view()
+}
+
+fn render_browser_frame(gpu: &mut GpuState, incoming: BrowserFrame, frame: &Frame<'_>) {
     assert_eq!(
         frame.format, gpu.target_format,
         "WPE target format changed after setup"
@@ -221,7 +317,7 @@ fn render_browser_frame(gpu: &mut GpuState, incoming: BrowserFrame, frame: &GpuF
     }
 }
 
-fn render_dma_buf_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &GpuFrame<'_>) {
+fn render_dma_buf_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &Frame<'_>) {
     ensure_source_texture(
         gpu,
         frame.device,
@@ -239,12 +335,19 @@ fn render_dma_buf_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &G
         .source
         .as_ref()
         .expect("WPE source texture must exist before import");
-    let import = gpu.importer.copy_into(&mut incoming, &source.texture);
-    let mut encoder = import.encoder;
-    let guard = import.guard;
+    let mut import = gpu.importer.copy_into(&mut incoming, &source.texture);
     incoming.presented();
-    encode_browser_blit(gpu, &bind_group, frame, &mut encoder);
-    frame.queue.submit([encoder.finish()]);
+    encode_browser_blit(gpu, &bind_group, frame, &mut import.encoder);
+    // The Vulkan import records its queue-family acquire/copy/release into
+    // `command_buffers`; they go ahead of the blit encoder in one submission
+    // (the GLES path leaves it empty and has already run its copy).
+    frame.queue.submit(
+        import
+            .command_buffers
+            .into_iter()
+            .chain([import.encoder.finish()]),
+    );
+    let guard = import.guard;
     frame.queue.on_submitted_work_done(move || {
         drop(guard);
         incoming.release(None);
@@ -256,9 +359,9 @@ fn render_dma_buf_frame(gpu: &mut GpuState, mut incoming: DmaBufFrame, frame: &G
 ///
 /// The lease is returned as soon as the upload has been staged:
 /// [`wgpu::Queue::write_texture`] copies out of the mapping before it returns,
-/// which is the whole reason a shared-memory frame needs neither a fence nor the
-/// deferred release its dma-buf sibling takes.
-fn render_shm_frame(gpu: &mut GpuState, mut incoming: ShmFrame, frame: &GpuFrame<'_>) {
+/// which is the whole reason a shared-memory frame needs neither a fence nor
+/// the deferred release its dma-buf sibling takes.
+fn render_shm_frame(gpu: &mut GpuState, mut incoming: ShmFrame, frame: &Frame<'_>) {
     let format = incoming.format();
     ensure_source_texture(
         gpu,
@@ -341,13 +444,13 @@ fn create_source_bind_group(
 fn encode_browser_blit(
     gpu: &GpuState,
     bind_group: &wgpu::BindGroup,
-    frame: &GpuFrame<'_>,
+    frame: &Frame<'_>,
     encoder: &mut wgpu::CommandEncoder,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("waterui_wpe_blit"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &frame.view,
+            view: frame.view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -365,7 +468,7 @@ fn encode_browser_blit(
     pass.draw(0..6, 0..1);
 }
 
-fn create_gpu_state(context: &GpuContext<'_>) -> GpuState {
+fn create_gpu_state(context: &Context<'_>) -> GpuState {
     let importer = DmaBufImporter::new(context.device, context.queue, context.adapter);
     let shader = context
         .device
@@ -427,7 +530,7 @@ fn create_gpu_state(context: &GpuContext<'_>) -> GpuState {
                 entry_point: Some("fragment_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: context.surface_format,
+                    format: context.format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -440,7 +543,7 @@ fn create_gpu_state(context: &GpuContext<'_>) -> GpuState {
         });
     GpuState {
         importer,
-        target_format: context.surface_format,
+        target_format: context.format,
         pipeline,
         bind_group_layout,
         sampler: context.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -496,7 +599,7 @@ fn ensure_source_texture(
     });
 }
 
-fn clear_target(frame: &GpuFrame<'_>) {
+fn clear_target(frame: &Frame<'_>) {
     let mut encoder = frame
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -506,7 +609,7 @@ fn clear_target(frame: &GpuFrame<'_>) {
         let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("waterui_wpe_empty"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &frame.view,
+                view: frame.view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {

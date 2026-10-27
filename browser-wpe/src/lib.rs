@@ -8,26 +8,11 @@
 //! and passes dma-buf file descriptors — so this crate is empty elsewhere,
 //! the same way `waterui-gtk` is.
 //!
-//! A frame arrives in whichever platform buffer WPE rendered into, which
-//! [`BrowserFrame`] is the choice between. A display with a DRM render node
-//! renders into a dma-buf, which crosses as a
-//! [`wgpu_external_frame::dma_buf::DmaBufFrame`] and imports into a texture with
-//! no copy — importing a dma-buf is a general problem, so it lives in a crate
-//! that knows nothing about WPE or `WaterUI`. A display without one — a
-//! container, a virtual machine, a hosted CI runner — renders into shared
-//! memory, which crosses as an [`ShmFrame`] and is uploaded into the same
-//! texture. Neither is a fallback for the other: WPE Platform picks the kind
-//! from what the host can do. What is WPE's either way is the buffer lease
-//! ([`WpeFrameLease`]) and the compositing view built on top
+//! The frames themselves are [`wgpu_external_frame::dma_buf::DmaBufFrame`]s:
+//! importing a dma-buf into a `wgpu` texture is a general problem, so it lives
+//! in a crate that knows nothing about WPE or `WaterUI`. What is WPE's is the
+//! buffer lease ([`WpeFrameLease`]) and the compositing view built on top
 //! ([`BrowserGpuView`]).
-//!
-//! # Testing against the real engine
-//!
-//! `tests/real_engine.rs` drives an actual WPE `WebKit` runtime — navigation,
-//! history, and the `waterui` bridge in both directions. Running it needs a
-//! staged runtime, so it sits behind the `real-engine` feature and its module
-//! documentation carries the commands. `.github/workflows/browser-wpe.yml` runs
-//! it on the paths it guards; nothing else in CI does.
 
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod abi;

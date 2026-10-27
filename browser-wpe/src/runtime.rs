@@ -18,8 +18,14 @@ use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::abi::{ABI_VERSION, WaterWpePollFd, WaterWpeReadiness, WaterWpeRuntime, WpeApi};
+use crate::abi::{
+    ABI_VERSION, WaterWpePollFd as AbiPollFd, WaterWpeReadiness as AbiReadiness, WaterWpeRuntime,
+    WpeApi,
+};
 use crate::pump::{PumpDeadline, WpePollFd, WpeReadiness};
+
+/// Exact WPE `WebKit` line used by the bundled runtime.
+pub const WPE_WEBKIT_VERSION: &str = "2.52.5";
 
 /// How many descriptors a readiness report is asked for before it has to ask
 /// again with a larger buffer.
@@ -28,9 +34,6 @@ use crate::pump::{PumpDeadline, WpePollFd, WpeReadiness};
 /// and network process, so this is sized to answer in one call and grows from
 /// the count the bridge reports when it does not.
 const INITIAL_DESCRIPTOR_CAPACITY: usize = 16;
-
-/// Exact WPE `WebKit` line used by the bundled runtime.
-pub const WPE_WEBKIT_VERSION: &str = "2.52.5";
 
 #[derive(Deserialize)]
 struct RuntimeIdentity {
@@ -85,6 +88,14 @@ impl WpeRuntimePaths {
             "bundled WPE bridge is missing at {}. Package or run the app through `water` so WPE WebKit {WPE_WEBKIT_VERSION} is staged",
             bridge.display()
         );
+        let extension = self
+            .root
+            .join("lib/waterui-wpe/extensions/waterui_wpe_extension.so");
+        assert!(
+            extension.is_file(),
+            "bundled WPE web-process extension is missing at {}",
+            extension.display()
+        );
         let manifest = self.root.join("runtime.json");
         assert!(
             manifest.is_file(),
@@ -137,6 +148,24 @@ impl WpeRuntimePaths {
     }
 }
 
+/// The loader's only compatibility gate: the bridge reports the ABI it was
+/// built against, and anything but the exact version this crate declares is
+/// refused before a single other symbol is trusted.
+/// `load`'s order contract lifted out: the reported version is produced and
+/// validated before `resolve_rest` is ever called, so a bridge answering the
+/// wrong ABI is rejected without another symbol being touched.
+fn load_checked<T>(version: impl FnOnce() -> u32, resolve_rest: impl FnOnce() -> T) -> T {
+    assert_abi_version(version());
+    resolve_rest()
+}
+
+fn assert_abi_version(reported: u32) {
+    assert_eq!(
+        reported, ABI_VERSION,
+        "bundled WPE bridge ABI mismatch: runtime={reported}, WaterUI={ABI_VERSION}"
+    );
+}
+
 pub struct RuntimeApi {
     pub api: WpeApi,
     /// The bridge, mapped for the life of the process.
@@ -170,15 +199,22 @@ impl RuntimeApi {
                 bridge.display()
             )
         });
+        // The version gate runs before any other symbol is trusted: resolve
+        // only `abi_version`, check it, and only then look up the rest of the
+        // table — a bridge answering the wrong ABI is rejected without the
+        // signatures it might disagree on ever being named.
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
-        let api = unsafe { WpeApi::load(&library) };
-        // SAFETY: symbol resolved from the bridge library kept mapped by this
-        // runtime; see the module safety note.
-        let version = unsafe { (api.abi_version)() };
-        assert_eq!(
-            version, ABI_VERSION,
-            "bundled WPE bridge ABI mismatch: runtime={version}, WaterUI={ABI_VERSION}"
+        let abi_version: unsafe extern "C" fn() -> u32 =
+            unsafe { crate::abi::symbol(&library, b"water_wpe_abi_version\0") };
+        // SAFETY: `abi_version` resolved from the bridge library kept mapped by
+        // this runtime; see the module safety note.
+        let api = load_checked(
+            // SAFETY: see the module safety note.
+            || unsafe { abi_version() },
+            // SAFETY: every remaining symbol resolved from the bridge library
+            // kept mapped by this runtime; see the module safety note.
+            || unsafe { WpeApi::load(&library) },
         );
         Arc::new(Self {
             api,
@@ -188,8 +224,8 @@ impl RuntimeApi {
 }
 
 // SAFETY: the bridge ABI explicitly permits calling the frame-completion
-// functions from wgpu's completion thread, and the module stays mapped for the
-// life of the process, so the function pointers stay valid.
+// functions from wgpu's completion thread, and libloading keeps the module mapped
+// until the final `Arc` drops, so the function pointers stay valid.
 unsafe impl Send for RuntimeApi {}
 // SAFETY: see the `Send` impl — the API holds only function pointers into a module
 // that stays mapped, with no interior mutability.
@@ -205,17 +241,10 @@ struct RuntimeInner {
 }
 
 impl Drop for RuntimeInner {
-    /// Frees the runtime, and says so on both sides of the call.
-    ///
-    /// `water_wpe_runtime_free` drains the main context before it releases the
-    /// display, so the two events bracket every queued frame completion that
-    /// had not run yet.
     fn drop(&mut self) {
-        tracing::debug!("freeing the WPE runtime");
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.api.api.runtime_free)(self.raw.as_ptr()) };
-        tracing::debug!("freed the WPE runtime");
     }
 }
 
@@ -234,18 +263,10 @@ impl core::fmt::Debug for WpeRuntime {
 impl WpeRuntime {
     /// Loads and initializes the exact staged WPE runtime.
     ///
-    /// One runtime is live per process at a time. WPE `WebKit` is a process-wide
-    /// singleton — its web context, its `GLib` types and its display all belong to
-    /// one runtime on the thread that owns its main context — so a second one is
-    /// refused by the bridge rather than left to abort somewhere inside the
-    /// engine. Dropping a [`WpeRuntime`] releases the claim; work that needs two
-    /// belongs in two processes, which is why the real-engine tests run one test
-    /// per process.
-    ///
     /// # Panics
     ///
-    /// Panics when the runtime is missing, invalid, ABI-incompatible, already
-    /// live in this process, or fails to initialize.
+    /// Panics when the runtime is missing, invalid, ABI-incompatible, or fails
+    /// to initialize.
     #[must_use]
     pub fn initialize(paths: &WpeRuntimePaths) -> Self {
         let api = RuntimeApi::load(paths);
@@ -291,8 +312,8 @@ impl WpeRuntime {
     /// Panics when the bridge reports more descriptors than a `usize` holds.
     #[must_use]
     pub fn readiness(&self) -> WpeReadiness {
-        let mut report = WaterWpeReadiness::default();
-        let mut descriptors = vec![WaterWpePollFd::default(); INITIAL_DESCRIPTOR_CAPACITY];
+        let mut report = AbiReadiness::default();
+        let mut descriptors = vec![AbiPollFd::default(); INITIAL_DESCRIPTOR_CAPACITY];
         loop {
             let capacity = c_uint::try_from(descriptors.len())
                 .expect("the WPE descriptor buffer is sized by this crate");
@@ -315,7 +336,7 @@ impl WpeRuntime {
             }
             // The bridge wrote nothing and answered with the size it needs; ask
             // again with a buffer that large, as `g_main_context_query` is used.
-            descriptors.resize(needed, WaterWpePollFd::default());
+            descriptors.resize(needed, AbiPollFd::default());
         }
         WpeReadiness::new(
             report.ready,
@@ -398,4 +419,62 @@ pub fn take_error(api: &RuntimeApi, error: *mut c_char) -> String {
     // see the module safety note.
     unsafe { (api.api.string_free)(error) };
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assert_abi_version;
+
+    #[test]
+    fn the_loader_accepts_the_declared_abi() {
+        assert_abi_version(super::ABI_VERSION);
+    }
+
+    #[test]
+    #[should_panic(expected = "ABI mismatch")]
+    fn the_loader_rejects_an_abi4_bridge() {
+        assert_abi_version(4);
+    }
+}
+
+#[cfg(test)]
+mod loader_order_tests {
+    use super::load_checked;
+    use std::cell::RefCell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    /// The whole contract `load` exists for, proven without a bridge: when the
+    /// version probe reports a rejected ABI, the resolver that would name the
+    /// rest of the table is never reached.
+    #[test]
+    fn a_rejected_version_never_resolves_the_table() {
+        let calls = RefCell::new(Vec::new());
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            load_checked(
+                || {
+                    calls.borrow_mut().push("abi_version");
+                    4
+                },
+                || calls.borrow_mut().push("WpeApi::load"),
+            );
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(*calls.borrow(), vec!["abi_version"]);
+    }
+
+    /// And the acceptance path resolves the table after the probe, in order.
+    #[test]
+    fn an_accepted_version_resolves_the_table_afterwards() {
+        let calls = RefCell::new(Vec::new());
+        load_checked(
+            || {
+                calls.borrow_mut().push("abi_version");
+                5
+            },
+            || {
+                calls.borrow_mut().push("WpeApi::load");
+            },
+        );
+        assert_eq!(*calls.borrow(), vec!["abi_version", "WpeApi::load"]);
+    }
 }

@@ -19,6 +19,8 @@ categories = ["gui", "web-programming"]
 # the exact crate version it depends on rather than keeping a copy of its own.
 [package.metadata.waterui.wpe-runtime]
 version = "2.52.5"
+bridge-abi = 5
+native-source = "native"
 
 [lints]
 workspace = true
@@ -29,28 +31,30 @@ executor-core = "0.7.1"
 cookie = { version = "0.18.1", optional = true }
 futures = { version = "0.3", optional = true }
 libloading = "0.9"
-nami = { version = "0.11.0", optional = true }
+nami = { version = "0.13", optional = true }
 num-traits = { version = "0.2", default-features = false }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
-waterui-core = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev" }
-waterui-str = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
-waterui-url = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
-waterui-webview = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev", optional = true }
+waterui-core = { version = "0.5.1" }
+suiteki = { git = "https://github.com/water-rs/suiteki.git", branch = "dev", optional = true }
+waterui-url = { version = "0.5.1", optional = true }
+waterui-watcher-set = { version = "0.5.1", optional = true }
+waterui-webview = { version = "0.5.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
 futures-timer = "3"
 keycode = { version = "1.0", optional = true }
 kurbo = "0.13"
-waterui-graphics = { version = "0.3.0", git = "https://github.com/water-rs/waterui.git", branch = "dev", features = ["gpu"] }
-wgpu = "29.0.4"
-wgpu-external-frame = { version = "0.1.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "dev" }
+waterui-graphics = { version = "0.5.1", features = ["gpu"] }
+wgpu = "30.0.1"
+wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "dev" }
 xkeysym = { version = "0.2.1", optional = true }
 
 [dev-dependencies]
 base64 = "0.22"
 executor-core = { version = "0.7.1", features = ["async-executor"] }
+libtest-mimic = { version = "0.8.2", default-features = false }
 pollster = "1.0"
 tiny_http = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -60,7 +64,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # beside the shader compares them on any host — pinned to the version `wgpu`
 # parses the shader with, so the reflection answers for the same front end.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 
 [[example]]
 name = "runtime_smoke"
@@ -68,12 +72,13 @@ required-features = ["runtime-smoke"]
 
 [[test]]
 name = "real_engine"
+harness = false
 required-features = ["real-engine"]
 
 [features]
 default = ["webview"]
 real-engine = ["webview", "waterui-webview/conformance"]
-runtime-smoke = ["webview"]
+runtime-smoke = ["webview", "waterui-webview/conformance"]
 webview = [
     "dep:cookie",
     "dep:futures",
@@ -81,8 +86,9 @@ webview = [
     "dep:nami",
     "dep:serde",
     "dep:serde_json",
-    "dep:waterui-str",
+    "dep:suiteki",
     "dep:waterui-url",
+    "dep:waterui-watcher-set",
     "dep:waterui-webview",
     "dep:xkeysym",
 ]

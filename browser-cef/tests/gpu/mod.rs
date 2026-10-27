@@ -60,6 +60,7 @@ pub fn unusable_reason() -> Option<String> {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }));
     let information = match adapter {
         Ok(adapter) => adapter.get_info(),
