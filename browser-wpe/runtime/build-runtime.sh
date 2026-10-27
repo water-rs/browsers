@@ -140,7 +140,7 @@ metrics="$output_directory/wpe-smoke-$version-linux-$architecture.json"
 python3 "$runtime_directory/run-smoke.py" \
     --archive "$output_directory/waterui-wpe-$version-linux-$architecture.zip" \
     --binary "$smoke_binary" \
-    --runtime "$output_directory/wpe-runtime-$version-linux-$architecture" \
+    --runtime "$stage" \
     --snapshot "$snapshot" \
     --metrics "$metrics" \
     --timeout-seconds "$smoke_timeout_seconds"
