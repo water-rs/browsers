@@ -9,7 +9,7 @@ resolver = "2"
 # workspace, so the one place a `rust-version` line lives here is
 # `[workspace.package]`, inherited by every member.
 [workspace.package]
-rust-version = "1.95"
+rust-version = "1.99"
 
 [workspace.lints.rust]
 missing_docs = "warn"
@@ -27,3 +27,32 @@ nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "warn"
 multiple_crate_versions = "allow"
+
+[patch.crates-io]
+# wgpu's Metal backend reads `kCGColorSpace*` globals to negotiate extended
+# Display P3; the water-rs fork backport carries the fix WaterUI pins.
+naga = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+naga-types = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-apple = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-emscripten = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-core-deps-windows-linux-android = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-hal = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-naga-bridge = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+wgpu-types = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-shared-memory-v30" }
+shaderloom = { git = "https://github.com/water-rs/shaderloom", branch = "dev" }
+# The browser crates ask for the published `waterui-*` semver lines like every
+# extracted WaterUI package does; this repo's graph resolves them against the
+# `dev` branch of water-rs/waterui and WaterUI's own workspace patches them
+# onto its `path` members, so a consumer gets one copy either way.
+waterui-chromium = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-core = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-graphics = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-url = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-watcher-set = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-webview = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+# waterui's manifest asks for the published `suiteki` semver line; this repo
+# and waterui's workspace both patch it onto the git source so every `Str`
+# in the graph is the same crate.
+suiteki = { git = "https://github.com/water-rs/suiteki", branch = "dev" }

@@ -1,0 +1,7 @@
+[env]
+# cherenkov-gpu's Apple contract (graphics/cherenkov/docs/api.md in waterui)
+# requires OS 26 APIs; the deployment-agreement checks read these against the
+# framework metadata, and a build inheriting the host's default deployment
+# target panics instead of compiling.
+MACOSX_DEPLOYMENT_TARGET = "26.0"
+IPHONEOS_DEPLOYMENT_TARGET = "26.0"

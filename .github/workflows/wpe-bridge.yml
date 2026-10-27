@@ -11,9 +11,11 @@ name: WPE Bridge
 # This job compiles the bridge on a pull request in minutes, against a runtime
 # that dispatch already published. It builds nothing itself: the WPE runtime is
 # whatever the last real-engine run packaged, downloaded from the `wpe-runtime`
-# prerelease that workflow uploads to (#31). It is not a substitute for that
-# workflow — nothing here runs the engine — it is the compiler pass, moved off
-# the dispatch and onto the change.
+# prerelease that workflow uploads to (#31). It installs the just-built bridge
+# over that prefix and runs the engine's real-engine and runtime-smoke tests —
+# so a pull request gets runtime verification in minutes without rebuilding
+# WebKit. It is not a substitute for that workflow: packaging and publishing
+# the runtime still belong to it.
 
 permissions:
   contents: read
@@ -22,8 +24,10 @@ on:
   pull_request:
     branches: ["**"]
     paths:
-      - browser-wpe/native/**
-      - browser-wpe/runtime/**
+      - browser-wpe/**
+      - tests/pages/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/wpe-bridge.yml
       - .github/apt-mirrors.txt
 
@@ -44,7 +48,7 @@ jobs:
       CC: gcc-12
       CXX: g++-12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `native/CMakeLists.txt` asks pkg-config for five modules. Two of them —
       # `wpe-webkit-2.0` and `wpe-platform-2.0` — come from the restored prefix;
@@ -58,9 +62,14 @@ jobs:
           # stalled this step past the job timeout.
           sudo cp .github/apt-mirrors.txt /etc/apt/apt-mirrors.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config gcc-12 g++-12 unzip \
-            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libdrm-dev
+          sudo apt-fast install -y --no-install-recommends \
+            cmake ninja-build pkg-config gcc-12 g++-12 unzip gdb \
+            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libdrm-dev \
+            nasm libasound2-dev libva-dev libfontconfig1-dev libgbm-dev \
+            libxcb1-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libgtk-4-dev \
+            libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev \
+            libxkbcommon-dev mesa-vulkan-drivers libvulkan1 \
+            bubblewrap xdg-dbus-proxy
 
       # The packaged runtime `wpe-real-engine.yml` publishes, under that
       # workflow's own naming: `wpe-runtime-<version>-<os>-<arch>-<hash>.zip`,
@@ -147,3 +156,27 @@ jobs:
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_PREFIX_PATH="$WATERUI_WPE_PREFIX"
           cmake --build bridge-build
+
+      # The bridge the packaged runtime loads is the one just built, not the
+      # archive's — install it over the downloaded prefix so the test run
+      # below exercises this commit's code.
+      - name: Install the bridge into the runtime prefix
+        run: cmake --install bridge-build --prefix "$WATERUI_WPE_PREFIX"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+
+      # The same command the dedicated real-engine workflow runs, against the
+      # published prefix with this commit's bridge installed into it — no
+      # WebKit rebuild, no publish.
+      - name: Run the WPE real-engine tests
+        env:
+          WATERUI_WPE_RUNTIME: ${{ env.WATERUI_WPE_PREFIX }}
+          WATERUI_WPE_CONSOLE: "1"
+        run: |
+          sudo sysctl -w kernel.core_pattern=/tmp/waterui-core.%E.%p
+          ulimit -c unlimited
+          browser-wpe/runtime/run-with-crash-report.py \
+            cargo nextest run -p waterui-browser-wpe \
+              --all-targets --features real-engine,runtime-smoke \
+              --success-output immediate

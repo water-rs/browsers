@@ -200,6 +200,12 @@ impl ShmFrame {
     }
 }
 
+// SAFETY: the SHM mapping `data` points into is valid for the frame's whole
+// lifetime — the token's lease holds it until `release` — so crossing the
+// UI/render boundary inside `BrowserFrame` observes the same contract
+// `unsafe impl Send for WpeFrameLease` already asserts.
+unsafe impl Send for ShmFrame {}
+
 #[cfg(test)]
 mod tests {
     use std::os::fd::OwnedFd;

@@ -104,7 +104,8 @@ use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, WatcherGuard, WebView, WebViewController, WebViewEvent,
+    ScriptMessageHandler, UserScript, WatcherGuard, WebView, WebViewConfig, WebViewController,
+    WebViewEvent,
 };
 
 /// How long one wait may take before the check gives up.
@@ -240,6 +241,24 @@ impl Engine {
         }
     }
 
+    /// Drives one of the engine's futures to completion on this loop.
+    fn block_on<F: Future>(&self, what: &str, future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                return value;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {TIMEOUT:?} waiting for {what}"
+            );
+            self.step();
+            std::thread::yield_now();
+        }
+    }
+
     /// One turn of everything this test drives.
     fn step(&self) {
         self.serve();
@@ -273,7 +292,14 @@ struct Page<'a> {
 
 impl<'a> Page<'a> {
     fn open(engine: &'a Engine) -> Self {
-        let webview = engine.controller.open();
+        let mut config = WebViewConfig::default();
+        config.bridge_origins = OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/"));
+        config.scripts = vec![UserScript::new(
+            "waterui:test-state-seed",
+            STATE_SEED_JS,
+            ScriptInjectionTime::DocumentStart,
+        )];
+        let webview = engine.controller.open_with(config);
         let handle = webview.handle();
 
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -322,15 +348,6 @@ impl<'a> Page<'a> {
                 ().into_js_reply()
             })
         });
-
-        // Exactly what `WebViewOpen::create` installs, in the same order: the
-        // policy first, so no handler is ever reachable unguarded.
-        handle.set_bridge_origins(OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/")));
-        handle.inject_script(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        );
 
         let page = Self {
             engine,
@@ -424,8 +441,8 @@ impl<'a> Page<'a> {
         self.wait_for(what, || (self.loads() > loads).then_some(()));
         self.wait_for("the history signals to catch up with the browser", || {
             let handle = self.webview.handle();
-            (self.webview.can_go_back().get() == handle.can_go_back()
-                && self.webview.can_go_forward().get() == handle.can_go_forward())
+            (self.webview.can_go_back().snapshot() == handle.can_go_back()
+                && self.webview.can_go_forward().snapshot() == handle.can_go_forward())
             .then_some(())
         });
     }
@@ -484,23 +501,23 @@ fn navigation_reaches_each_url_and_history_moves_both_ways(engine: &Engine) {
     // where WPE and the Apple backends start with an empty history. Pinning it
     // here means the day it changes is the day this line fails.
     assert!(
-        page.webview.can_go_back().get(),
+        page.webview.can_go_back().snapshot(),
         "CEF has stopped committing the blank document it creates a browser on"
     );
 
     let second = page.open_page("/second");
     assert_eq!(text(&second, "page"), "second");
     assert_eq!(page.location(), engine.url("/second").as_str());
-    assert!(page.webview.can_go_back().get());
-    assert!(!page.webview.can_go_forward().get());
+    assert!(page.webview.can_go_back().snapshot());
+    assert!(!page.webview.can_go_forward().snapshot());
 
     page.navigate("the engine to go back", || page.webview.go_back());
     assert_eq!(page.location(), engine.url("/first").as_str());
-    assert!(page.webview.can_go_forward().get());
+    assert!(page.webview.can_go_forward().snapshot());
 
     page.navigate("the engine to go forward", || page.webview.go_forward());
     assert_eq!(page.location(), engine.url("/second").as_str());
-    assert!(!page.webview.can_go_forward().get());
+    assert!(!page.webview.can_go_forward().snapshot());
 }
 
 /// The reply a handler returns has to arrive as the value it returned.
@@ -656,7 +673,139 @@ fn the_raw_evaluation_path_answers_json(engine: &Engine) {
 /// Every check, in the order they run.
 type Check = (&'static str, fn(&Engine));
 
-const CHECKS: [Check; 6] = [
+/// The asset origin serves the bundled conformance site through CEF's native
+/// scheme handler — the shared case every engine's real-engine suite runs.
+fn the_asset_origin_serves_bundled_content(engine: &Engine) {
+    engine.block_on(
+        "the asset-origin conformance case",
+        waterui_webview::conformance::asset_origin_serves_bundled_content(&engine.controller),
+    );
+}
+
+/// Mirrored state and bridge replies reach only the documents the admission
+/// policy admits — the shared case every engine's real-engine suite runs.
+///
+/// The case serves its own pages from its own threads and drives two views
+/// through the engine's controller; `block_on` keeps CEF pumped and the local
+/// executor ticking while it walks the navigations.
+fn mirrored_state_reaches_only_admitted_documents(engine: &Engine) {
+    engine.block_on(
+        "the mirrored-state admission conformance case",
+        waterui_webview::conformance::mirrored_state_reaches_only_admitted_documents(
+            &engine.controller,
+        ),
+    );
+}
+
+/// `include_web!`'s serving layer — a `DirectoryServer` over the site written
+/// to disk the way a staged bundle carries it — serves the same conformance
+/// site through the engine's native interception.
+fn the_directory_server_serves_the_staged_bundle(engine: &Engine) {
+    let directory = tempfile::tempdir().expect("staged bundle tempdir");
+    waterui_webview::conformance::write_bundled_site(directory.path());
+    // The strict default policy is what `include_web!` ships — including
+    // `'wasm-unsafe-eval'`, so the conformance site's WASM module compiles.
+    let server = waterui_webview::DirectoryServer::new(directory.path()).into_server();
+    engine.block_on("the DirectoryServer bundled-site case", async move {
+        waterui_webview::conformance::asset_origin_serves_bundled_content_with(
+            &engine.controller,
+            server,
+        )
+        .await;
+    });
+}
+
+/// A headless Chromium page serves the same bundled site through CDP `Fetch`
+/// interception, under `https://waterui.localhost`.
+///
+/// `WebView` answers the asset origin through CEF's native scheme handler; a
+/// `ChromiumPage` answers it through the `DevTools` agent, which is the only
+/// interception a headless page has. The site and the assertions are the
+/// shared ones — only the evaluator differs: `Runtime.evaluate` over the
+/// page's CDP session.
+fn the_chromium_cdp_asset_origin_serves_bundled_content(engine: &Engine) {
+    engine.block_on("the Chromium CDP asset-origin case", async {
+        let page = engine
+            .runtime
+            .chromium_controller()
+            .headless(waterui_chromium::ChromiumConfiguration {
+                asset_server: Some(waterui_webview::conformance::bundled_site_server()),
+                ..waterui_chromium::ChromiumConfiguration::default()
+            })
+            .await
+            .expect("a headless Chromium page attaches its DevTools agent");
+
+        let origin = page
+            .asset_origin()
+            .expect("a Chromium page opened with an asset server reports its origin")
+            .clone();
+        assert_eq!(
+            origin.as_str(),
+            waterui_webview::assets::ASSET_HTTPS_ORIGIN,
+            "the Chromium asset origin is the https spelling"
+        );
+
+        let cdp = page.cdp().clone();
+        // A round trip answered before navigation orders this check's commands
+        // after the `Fetch.enable` `intercept` queued when the page was
+        // created: the DevTools agent applies commands in the order they were
+        // issued.
+        cdp_eval(&cdp, "'installed'").await;
+
+        let entry: Url = format!("{origin}/index.html")
+            .parse()
+            .expect("the entry URL");
+        page.navigate(&entry);
+        loop {
+            let href = cdp_eval(&cdp, "location.href").await;
+            if href == Value::String(entry.as_str().to_string()) {
+                break;
+            }
+        }
+
+        waterui_webview::conformance::assert_bundled_site(origin.as_str(), async |source| {
+            cdp_eval(&cdp, source).await
+        })
+        .await;
+
+        page.close()
+            .await
+            .expect("the headless Chromium page closes");
+    });
+}
+
+/// Evaluates `source` on a page's CDP session and returns the JSON value.
+///
+/// `awaitPromise` + `returnByValue` make an async expression answer its
+/// resolved value, so the page-side probes read exactly like the ones the web
+/// view path evaluates.
+#[expect(
+    clippy::future_not_send,
+    reason = "CEF DevTools sessions are bound to the browser UI thread"
+)]
+async fn cdp_eval(cdp: &waterui_chromium::CdpSession, source: &str) -> Value {
+    let reply = cdp
+        .execute_raw(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": source,
+                "awaitPromise": true,
+                "returnByValue": true,
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{source}` failed to run: {error}"));
+    if let Some(details) = reply.get("exceptionDetails") {
+        panic!("`{source}` threw: {details}");
+    }
+    reply
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+const CHECKS: [Check; 10] = [
     (
         "navigation_reaches_each_url_and_history_moves_both_ways",
         navigation_reaches_each_url_and_history_moves_both_ways,
@@ -680,6 +829,22 @@ const CHECKS: [Check; 6] = [
     (
         "the_installed_realization_draws_a_live_page",
         the_installed_realization_draws_a_live_page,
+    ),
+    (
+        "the_asset_origin_serves_bundled_content",
+        the_asset_origin_serves_bundled_content,
+    ),
+    (
+        "mirrored_state_reaches_only_admitted_documents",
+        mirrored_state_reaches_only_admitted_documents,
+    ),
+    (
+        "the_directory_server_serves_the_staged_bundle",
+        the_directory_server_serves_the_staged_bundle,
+    ),
+    (
+        "the_chromium_cdp_asset_origin_serves_bundled_content",
+        the_chromium_cdp_asset_origin_serves_bundled_content,
     ),
 ];
 
