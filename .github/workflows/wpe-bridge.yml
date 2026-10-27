@@ -111,22 +111,16 @@ jobs:
       # than name where `wpe-real-engine.yml` happened to build it, the archive
       # is asked: `prefix=` in the same file records it, and the tree goes back
       # there.
-      - name: Stage the packaged runtime at the prefix it was built at
+      - name: Stage the packaged runtime
         shell: bash
         run: |
           archive="$(echo runtime-artifacts/*.zip)"
           test -f "$archive"
-          unzip -q "$archive" -d staged-runtime
-          descriptor=staged-runtime/lib/pkgconfig/wpe-webkit-2.0.pc
-          test -f "$descriptor"
-          prefix="$(sed -n 's/^prefix=//p' "$descriptor")"
-          if [[ -z "$prefix" ]]; then
-              echo "::error::$archive carries no pkg-config prefix, so the bridge cannot be compiled against it"
-              exit 1
-          fi
-          mkdir -p "$(dirname "$prefix")"
-          rm -rf "$prefix"
-          mv staged-runtime "$prefix"
+          # The packaged descriptors resolve against `${pcfiledir}`, so the
+          # runtime compiles the bridge wherever it is unpacked.
+          prefix="$GITHUB_WORKSPACE/staged-runtime"
+          unzip -q "$archive" -d "$prefix"
+          test -f "$prefix/lib/pkgconfig/wpe-webkit-2.0.pc"
           # The asset name carries the pin, and this is the archive's own word
           # on it — `runtime.json` is what `package-runtime.py` recorded the
           # archive as being. Compiling the bridge against the wrong WPE API
