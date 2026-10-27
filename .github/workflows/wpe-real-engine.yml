@@ -60,16 +60,16 @@ jobs:
     # 22.04 is what the packaged artifact is built on: `build-runtime.sh`
     # refuses to package against a glibc newer than the `maximum_glibc` floor in
     # `runtime/source.toml`, so this is the provisioning a shipped runtime gets.
-    # The same file's `minimum_gcc` is 12.2, above the runner's default GCC 11,
-    # so GCC 12 is installed and selected explicitly.
+    # The same file's `minimum_clang` is the toolchain upstream's development
+    # SDK builds this WebKit with; the jammy archive stops at Clang 15, so
+    # `llvm-apt-source` takes it from apt.llvm.org and selects it explicitly.
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     env:
-      CC: gcc-12
-      CXX: g++-12
       WATERUI_WPE_WORK_DIRECTORY: ${{ github.workspace }}/wpe-work
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/llvm-apt-source
       - uses: dtolnay/rust-toolchain@stable
       # The same native dependencies `ci.yml` installs, plus the Vulkan loader
       # and its software implementation: the runtime hands frames over as
@@ -78,7 +78,8 @@ jobs:
       # `xdg-dbus-proxy` are the host tools the packaged runtime launches its
       # web processes through — `WpeRuntimePaths::validate` insists on both, and
       # `build-runtime.sh` installs them itself, so this step is what a cache
-      # hit needs. GCC 12 is for the WebKit build, and `gdb` is what
+      # hit needs. The pinned Clang is for the WebKit build, `gcc-12`/`g++-12` supply
+      # the libstdc++ `build-runtime.sh` pins it to, and `gdb` is what
       # `run-smoke.py` reaches for when the smoke dies on a signal: without it
       # a crash reports a bare status and no stack.
       - name: Install Linux dependencies
@@ -88,7 +89,7 @@ jobs:
             libfontconfig1-dev libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev \
             libgdk-pixbuf-2.0-dev libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev \
             libwayland-dev libxkbcommon-dev mesa-vulkan-drivers libvulkan1 \
-            bubblewrap unzip xdg-dbus-proxy gcc-12 g++-12 gdb
+            bubblewrap unzip xdg-dbus-proxy "$CLANG_PACKAGE" gcc-12 g++-12 gdb
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wpe-real-engine
@@ -150,7 +151,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: wpe-work
-          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh') }}
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh', 'browser-wpe/runtime/compiler.sh') }}
 
       # The smoke this script ends with has crashed in a way that only happens
       # at full speed, which is exactly what a debugger perturbs away, so the
@@ -173,7 +174,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: wpe-work
-          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh') }}
+          key: wpe-webkit-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-wpe/runtime/source.toml', 'browser-wpe/runtime/build-webkit.sh', 'browser-wpe/runtime/compiler.sh') }}
 
       # The durable copy, written. One prerelease holds every packaged runtime,
       # each asset named for its identity, so a later run — on any branch —

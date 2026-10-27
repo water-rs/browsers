@@ -23,7 +23,7 @@ configuration_value() {
 version="$(configuration_value version)"
 released="$(configuration_value released)"
 maximum_glibc="$(configuration_value maximum_glibc)"
-minimum_gcc="$(configuration_value minimum_gcc)"
+minimum_clang="$(configuration_value minimum_clang)"
 smoke_timeout_seconds="$(configuration_value smoke_timeout_seconds)"
 # The pin every consumer reads is the crate's own metadata, so that the `water`
 # CLI can take it from the published crate instead of keeping a copy of its own.
@@ -37,7 +37,7 @@ crate_metadata="$(cargo metadata --format-version 1 --no-deps --manifest-path "$
 pinned_version="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(next(package for package in json.load(sys.stdin)["packages"] if package["name"] == sys.argv[1])["metadata"]["waterui"]["wpe-runtime"]["version"])' "$crate")"
 target_directory="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 
-if [[ -z "$version" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_gcc" || -z "$smoke_timeout_seconds" ]]; then
+if [[ -z "$version" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_clang" || -z "$smoke_timeout_seconds" ]]; then
     echo "invalid WPE runtime source configuration" >&2
     exit 1
 fi
@@ -60,27 +60,9 @@ case "$(uname -m)" in
         ;;
 esac
 
-c_compiler="${CC:-cc}"
-cxx_compiler="${CXX:-c++}"
-command -v "$c_compiler" >/dev/null || {
-    echo "WPE runtime C compiler is unavailable: $c_compiler" >&2
-    exit 1
-}
-command -v "$cxx_compiler" >/dev/null || {
-    echo "WPE runtime C++ compiler is unavailable: $cxx_compiler" >&2
-    exit 1
-}
-compiler_banner="$($c_compiler --version | head -n 1)"
-if [[ "$compiler_banner" != *gcc* && "$compiler_banner" != *GCC* ]]; then
-    echo "WPE runtime requires GCC $minimum_gcc or newer; $c_compiler is $compiler_banner" >&2
-    exit 1
-fi
-actual_gcc="$($c_compiler -dumpfullversion -dumpversion)"
-oldest_gcc="$(printf '%s\n%s\n' "$actual_gcc" "$minimum_gcc" | sort -V | head -n 1)"
-if [[ "$oldest_gcc" != "$minimum_gcc" ]]; then
-    echo "WPE WebKit $version requires GCC $minimum_gcc or newer; $c_compiler reports $actual_gcc" >&2
-    exit 1
-fi
+# shellcheck source=SCRIPTDIR/compiler.sh
+source "$runtime_directory/compiler.sh"
+select_wpe_compiler "$minimum_clang" "$version"
 
 actual_glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
 highest_glibc="$(printf '%s\n%s\n' "$actual_glibc" "$maximum_glibc" | sort -V | tail -n 1)"
@@ -129,6 +111,8 @@ cmake \
     -DCMAKE_INSTALL_PREFIX="$stage" \
     -DCMAKE_C_COMPILER="$c_compiler" \
     -DCMAKE_CXX_COMPILER="$cxx_compiler" \
+    -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install_dir" \
+    -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install_dir" \
     -DCMAKE_PREFIX_PATH="$stage"
 cmake --build "$bridge_build_directory"
 cmake --install "$bridge_build_directory"

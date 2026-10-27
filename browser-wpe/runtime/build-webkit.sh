@@ -22,8 +22,6 @@ if [[ $# -ne 1 ]]; then
 fi
 
 runtime_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-crate_directory="$(cd "$runtime_directory/.." && pwd)"
-repo_root="$(git -C "$runtime_directory" rev-parse --show-toplevel)"
 source_configuration="$runtime_directory/source.toml"
 work_directory="$(mkdir -p "$1" && cd "$1" && pwd)"
 
@@ -37,34 +35,16 @@ source_url="$(configuration_value source_url)"
 source_sha256="$(configuration_value source_sha256)"
 glib_dependencies_url="$(configuration_value glib_dependencies_url)"
 glib_dependencies_sha256="$(configuration_value glib_dependencies_sha256)"
-minimum_gcc="$(configuration_value minimum_gcc)"
+minimum_clang="$(configuration_value minimum_clang)"
 
-if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$minimum_gcc" ]]; then
+if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$minimum_clang" ]]; then
     echo "invalid WPE runtime source configuration" >&2
     exit 1
 fi
 
-c_compiler="${CC:-cc}"
-cxx_compiler="${CXX:-c++}"
-command -v "$c_compiler" >/dev/null || {
-    echo "WPE runtime C compiler is unavailable: $c_compiler" >&2
-    exit 1
-}
-command -v "$cxx_compiler" >/dev/null || {
-    echo "WPE runtime C++ compiler is unavailable: $cxx_compiler" >&2
-    exit 1
-}
-compiler_banner="$($c_compiler --version | head -n 1)"
-if [[ "$compiler_banner" != *gcc* && "$compiler_banner" != *GCC* ]]; then
-    echo "WPE runtime requires GCC $minimum_gcc or newer; $c_compiler is $compiler_banner" >&2
-    exit 1
-fi
-actual_gcc="$($c_compiler -dumpfullversion -dumpversion)"
-oldest_gcc="$(printf '%s\n%s\n' "$actual_gcc" "$minimum_gcc" | sort -V | head -n 1)"
-if [[ "$oldest_gcc" != "$minimum_gcc" ]]; then
-    echo "WPE WebKit $version requires GCC $minimum_gcc or newer; $c_compiler reports $actual_gcc" >&2
-    exit 1
-fi
+# shellcheck source=SCRIPTDIR/compiler.sh
+source "$runtime_directory/compiler.sh"
+select_wpe_compiler "$minimum_clang" "$version"
 
 archive="$work_directory/wpewebkit.tar.xz"
 source_directory="$work_directory/wpewebkit-$version"
@@ -178,6 +158,8 @@ if [[ ! -f "$installed_marker" ]]; then
         -DCMAKE_INSTALL_LIBEXECDIR=libexec \
         -DCMAKE_C_COMPILER="$c_compiler" \
         -DCMAKE_CXX_COMPILER="$cxx_compiler" \
+        -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install_dir" \
+        -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install_dir" \
         -DCLANGD_AUTO_SETUP=OFF \
         -DBWRAP_EXECUTABLE=/usr/bin/bwrap \
         -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy \
