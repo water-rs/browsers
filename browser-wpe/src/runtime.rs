@@ -25,7 +25,7 @@ use crate::abi::{
 use crate::pump::{PumpDeadline, WpePollFd, WpeReadiness};
 
 /// Exact WPE `WebKit` line used by the bundled runtime.
-pub const WPE_WEBKIT_VERSION: &str = "2.52.5";
+pub const WPE_WEBKIT_VERSION: &str = "2.54.2";
 
 /// How many descriptors a readiness report is asked for before it has to ask
 /// again with a larger buffer.

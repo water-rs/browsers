@@ -8,7 +8,7 @@ name: WPE Real Engine
 # It is its own workflow rather than a leg of `ci.yml` because a hosted runner
 # cannot obtain the runtime the cheap way. The `water` CLI downloads a prebuilt
 # archive for the pinned release, and none is published: no
-# `browser-runtime-manifest.json` and no `waterui-wpe-2.52.5-linux-*.zip` exists
+# `browser-runtime-manifest.json` and no `waterui-wpe-2.54.2-linux-*.zip` exists
 # on any release of `water-rs/waterui` or of this repository. What is left is
 # `runtime/build-runtime.sh`, which compiles WPE WebKit from the pinned source
 # tarball — a multi-hour job, hence the timeout below and the caches. There are
