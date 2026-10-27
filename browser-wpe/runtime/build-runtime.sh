@@ -117,6 +117,18 @@ cmake \
 cmake --build "$bridge_build_directory"
 cmake --install "$bridge_build_directory"
 
+# `gsettings-desktop-schemas` and `libglib2.0-bin` are for the packaged runtime
+# rather than for the build: the GIO modules the package stages read GSettings,
+# and a schema they cannot find is a `g_error` that kills the network process on
+# the first network load. The first package carries the schemas the proxy
+# resolver reads, the second carries `glib-compile-schemas` and `gsettings`,
+# and `package-runtime.py` compiles and checks them into the artifact. They are
+# installed here, beside the packaging that needs them, so the WebKit build
+# stage — and the cache keyed on its script — does not change for them.
+sudo apt-get install -y --no-install-recommends \
+    gsettings-desktop-schemas \
+    libglib2.0-bin
+
 python3 "$runtime_directory/package-runtime.py" \
     --architecture "$architecture" \
     --maximum-glibc "$maximum_glibc" \

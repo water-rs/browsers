@@ -12,6 +12,7 @@ mod executor;
 mod linux {
     use std::cell::{Cell, RefCell};
     use std::ffi::{OsStr, OsString};
+    use std::mem::ManuallyDrop;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
@@ -265,10 +266,13 @@ mod linux {
     }
 
     pub fn run() {
+        // The crate's own teardown events are `debug`, and this run is where
+        // the order they happen in is the thing being watched.
         tracing_subscriber::fmt()
             .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,waterui_browser_wpe=debug")
+                }),
             )
             .init();
         let executor = SmokeExecutor::install();
@@ -338,6 +342,27 @@ mod linux {
             .unwrap_or_else(|error| panic!("WPE smoke GPU runtime creation failed: {error}"));
         render_to_png(&gpu_runtime, frame, &output_path);
         tracing::info!("PASS frame import and snapshot");
+
+        // Teardown, in the order the compiler would have dropped these anyway,
+        // said out loud. The engine's own threads keep running throughout, so
+        // when something dies here the log has to show how far the sequence had
+        // got. `render_to_png` consumed the frame and the view that leased it,
+        // so the compositing side is already down by here.
+        tracing::info!("snapshot written; tearing down");
+        drop(frame_ready);
+        tracing::info!("dropping the page, which owns the runtime");
+        drop(page);
+        // The GPU runtime is deliberately not dropped, and this is the same
+        // contract the engine gets: some libraries must not be unloaded from a
+        // running process. Dropping it drops the wgpu `Instance`, and
+        // wgpu-hal's GLES and Vulkan backends hold `libloading` handles for
+        // `libEGL` and `libvulkan`; closing those unloads Mesa's software
+        // drivers — llvmpipe and the LLVM inside it, which is what a runner
+        // with no GPU renders through — and those register `atexit`
+        // destructors that have to still be mapped when the process exits.
+        tracing::info!("pinning the GPU runtime for the life of the process");
+        let _gpu_runtime = ManuallyDrop::new(gpu_runtime);
+        tracing::info!("smoke teardown complete");
     }
 }
 

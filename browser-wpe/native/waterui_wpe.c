@@ -158,10 +158,25 @@ static void water_wpe_frame_token_unref(WaterWpeFrameToken *token)
     g_free(token);
 }
 
+/* Whether the view a completion names still belongs to a page.
+ *
+ * A completion is queued onto the runtime's context and dispatched whenever the
+ * host next iterates it, which can be after the page has gone: the token holds
+ * the view alive, but `water_wpe_page_free` has already closed it and dropped
+ * the `WebKitWebView` whose side of the view listens for these signals. Telling
+ * a view nobody owns that its buffer came back reaches into that torn-down
+ * listener. The back pointer `water_wpe_page_free` clears is exactly the
+ * question being asked, so it is what answers it. */
+static gboolean water_wpe_frame_token_has_page(WaterWpeFrameToken *token)
+{
+    return ((WaterView *)token->view)->page != NULL;
+}
+
 static gboolean water_wpe_frame_presented_on_main(gpointer user_data)
 {
     WaterWpeFrameToken *token = user_data;
-    wpe_view_buffer_rendered(token->view, token->buffer);
+    if (water_wpe_frame_token_has_page(token))
+        wpe_view_buffer_rendered(token->view, token->buffer);
     water_wpe_frame_token_unref(token);
     return G_SOURCE_REMOVE;
 }
@@ -174,9 +189,16 @@ typedef struct {
 static gboolean water_wpe_frame_released_on_main(gpointer user_data)
 {
     WaterWpeRelease *release = user_data;
-    if (release->release_fence_fd >= 0)
-        wpe_buffer_set_release_fence(release->token->buffer, release->release_fence_fd);
-    wpe_view_buffer_released(release->token->view, release->token->buffer);
+    if (water_wpe_frame_token_has_page(release->token)) {
+        if (release->release_fence_fd >= 0)
+            wpe_buffer_set_release_fence(
+                release->token->buffer,
+                release->release_fence_fd);
+        wpe_view_buffer_released(release->token->view, release->token->buffer);
+    } else if (release->release_fence_fd >= 0) {
+        /* `wpe_buffer_set_release_fence` would have taken the descriptor. */
+        close(release->release_fence_fd);
+    }
     water_wpe_frame_token_unref(release->token);
     g_free(release);
     return G_SOURCE_REMOVE;
@@ -482,6 +504,11 @@ static void water_wpe_configure_runtime_paths(void)
     char *plugin_scanner =
         g_build_filename(root, "libexec", "gstreamer-1.0", "gst-plugin-scanner", NULL);
     char *gio_modules = g_build_filename(root, "lib", "gio", "modules", NULL);
+    /* WebKit reads WEBKIT_EXEC_PATH only in a DEVELOPER_MODE build; otherwise
+     * it spawns its helper processes from the libexec directory compiled into
+     * the library, which is the prefix the runtime was built at and never the
+     * one it was unpacked into. runtime/build-webkit.sh turns that mode on for
+     * exactly this line. */
     g_setenv("WEBKIT_EXEC_PATH", exec_path, TRUE);
     g_setenv("WEBKIT_INJECTED_BUNDLE_PATH", bundle_path, TRUE);
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path, TRUE);
@@ -883,6 +910,17 @@ WaterWpePage *water_wpe_page_new(
 
     page->web_context = webkit_web_context_new();
     char *root = water_wpe_runtime_root();
+    /* The helper processes run inside WebKit's bubblewrap sandbox, which
+     * bind-mounts the system library directories, the prefix compiled into the
+     * library (gone once the runtime is unpacked somewhere else) and, in a
+     * DEVELOPER_MODE build, the parent of WEBKIT_EXEC_PATH -- that is
+     * `libexec`, not the runtime root. A WPEWebProcess spawned from a relocated
+     * runtime therefore cannot see `lib`, and its `$ORIGIN/../../lib` RPATH
+     * fails on libWPEWebKit itself. Mounting the runtime root read-only is the
+     * API for exactly this, and it only applies to a context that has not
+     * spawned a process yet: every page owns a fresh context, so each one
+     * mounts the root here, before its web view exists. */
+    webkit_web_context_add_path_to_sandbox(page->web_context, root, TRUE);
     char *extension_directory =
         g_build_filename(root, "lib", "waterui-wpe", "extensions", NULL);
     webkit_web_context_set_web_process_extensions_directory(
@@ -910,6 +948,17 @@ WaterWpePage *water_wpe_page_new(
      * `WebKitHardwareAccelerationPolicy` API is `#if PLATFORM(GTK)` in
      * `WebKitSettings.h`, and the WPE platform renders through `WPEView`'s
      * buffer pipeline, which is always accelerated. */
+    /* A JavaScript error in the injected bridge is reported to the page's own
+     * console, and the console goes nowhere by default: a page whose bridge
+     * threw is indistinguishable from one that simply never answered. Setting
+     * `WATERUI_WPE_CONSOLE` routes it to stdout, which is how a run that fails
+     * on a silent page gets to say why. It is off unless asked for, because a
+     * shipped application has no business printing a page's console to its
+     * standard output. */
+    if (g_getenv("WATERUI_WPE_CONSOLE") != NULL)
+        webkit_settings_set_enable_write_console_messages_to_stdout(
+            webkit_web_view_get_settings(page->web_view),
+            TRUE);
     page->view = webkit_web_view_get_wpe_view(page->web_view);
     g_assert(WATER_IS_VIEW(page->view));
     ((WaterView *)page->view)->page = page;
@@ -1675,6 +1724,9 @@ void water_wpe_frame_presented(void *user_data)
         NULL);
 }
 
+/* Releasing hands the caller's reference to the queued release, which is the
+ * last one: `water_wpe_frame_released_on_main` drops it after telling the view
+ * the buffer is back. The caller must not touch the token afterwards. */
 void water_wpe_frame_release(void *user_data, int release_fence_fd)
 {
     WaterWpeFrameToken *token = user_data;
@@ -1687,5 +1739,4 @@ void water_wpe_frame_release(void *user_data, int release_fence_fd)
         water_wpe_frame_released_on_main,
         release,
         NULL);
-    water_wpe_frame_token_unref(token);
 }
