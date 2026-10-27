@@ -5,13 +5,15 @@ description: >-
   Clang as CC/CXX for the rest of the job. The jammy archive stops at Clang 15,
   and apt.llvm.org is where upstream's own SDK takes newer ones from. The
   calling step's own `apt-get update` and install pick the source up; the
-  package to install is exported as CLANG_PACKAGE.
+  package to install is exported as CLANG_PACKAGE. The pin is read beside
+  this action, so a repository that checks browsers out under a subdirectory
+  can use it unchanged.
 runs:
   using: composite
   steps:
     - shell: bash
       run: |
-        major="$(sed -n 's/^minimum_clang = "\([0-9]*\)"$/\1/p' browser-wpe/runtime/source.toml)"
+        major="$(sed -n 's/^minimum_clang = "\([0-9]*\)"$/\1/p' "$GITHUB_ACTION_PATH/../../../browser-wpe/runtime/source.toml")"
         test -n "$major"
         . /etc/os-release
         curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
