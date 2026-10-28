@@ -896,7 +896,7 @@ fn the_navigation_policy_keeps_the_view_on_its_origin(engine: &Engine) {
     // application-driven load after it both navigates and answers.
     page.block_on(
         page.webview
-            .run_javascript("window.location.assign('https://example.com/'); 'assigned'"),
+            .run_javascript("(window.location.assign('https://example.com/'), 'assigned')"),
     )
     .expect("the assignment evaluates");
     page.wait_for("the cross-origin navigation to reach the policy", || {
@@ -920,11 +920,9 @@ fn the_navigation_policy_keeps_the_view_on_its_origin(engine: &Engine) {
 
     // A subframe's own load reaches the policy as a subframe and is allowed
     // through — `stay_on_origin` admits every non-main-frame navigation.
-    page.block_on(
-        page.webview.run_javascript(
-            "document.body.innerHTML = '<iframe src=\"/first\"></iframe>'; 'framed'",
-        ),
-    )
+    page.block_on(page.webview.run_javascript(
+        "(document.body.innerHTML = '<iframe src=\"/first\"></iframe>', 'framed')",
+    ))
     .expect("the iframe injects");
     page.wait_for("the subframe's navigation to reach the policy", || {
         requests
