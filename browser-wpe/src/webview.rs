@@ -170,6 +170,7 @@ impl WpeWebViewHandle {
             );
         }
         page.set_bridge_origins(config.bridge_origins);
+        page.set_navigation_policy(config.navigation_policy.clone());
         if let Some(server) = config.asset_server {
             page.set_asset_server(server);
         }

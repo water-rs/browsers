@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define WATER_WPE_ABI_VERSION 5
+#define WATER_WPE_ABI_VERSION 6
 #ifdef WATER_WPE_EXPECTED_ABI_VERSION
 static_assert(WATER_WPE_ABI_VERSION == WATER_WPE_EXPECTED_ABI_VERSION,
     "WPE bridge ABI disagrees with the resolved browser package");
@@ -89,6 +89,22 @@ typedef WaterWpeAssetResponse (*WaterWpeAssetCallback)(
     const char *method,
     const char *uri);
 
+/* Answers one page-initiated navigation decision synchronously. `url` is the
+ * navigation's target, `from` the committed document it leaves (NULL before
+ * the first commit), `is_main_frame` whether the action targets the top-level
+ * frame, and `user_gesture` what `webkit_navigation_action_is_user_gesture`
+ * reports. Returns whether the engine proceeds: TRUE allows the navigation,
+ * FALSE ignores it. Redirects, the engine's own response decisions and
+ * application-directed loads — the navigations `water_wpe_page_load_uri`,
+ * `water_wpe_page_reload`, `water_wpe_page_go_back` and
+ * `water_wpe_page_go_forward` issue — never reach this callback. */
+typedef bool (*WaterWpePolicyCallback)(
+    void *user_data,
+    const char *url,
+    const char *from,
+    bool is_main_frame,
+    bool user_gesture);
+
 /* One descriptor the runtime's main context wants watched, in `poll(2)` terms:
  * `events` is a mask of `POLLIN` and friends, taken from GLib unchanged. */
 typedef struct {
@@ -149,6 +165,17 @@ void water_wpe_page_free(WaterWpePage *page);
 void water_wpe_page_set_asset_server(
     WaterWpePage *page,
     WaterWpeAssetCallback callback,
+    void *user_data,
+    WaterWpeDestroyNotify destroy);
+/* Arms the page's navigation policy: `callback` answers each page-initiated
+ * navigation action before the engine commits to it, returning FALSE to keep
+ * the engine from proceeding. Pass NULL to disarm; `user_data` is freed by
+ * `destroy` when the page dies. Navigations the bridge's own entry points
+ * issue are marked internally, like WebKit's `pendingAPIRequestURL`, and the
+ * engine's decision bypasses the callback for them. */
+void water_wpe_page_set_navigation_policy(
+    WaterWpePage *page,
+    WaterWpePolicyCallback callback,
     void *user_data,
     WaterWpeDestroyNotify destroy);
 void water_wpe_page_set_bridge_origins(WaterWpePage *page, const char *wire);

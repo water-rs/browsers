@@ -103,9 +103,9 @@ use waterui_core::{Environment, View as _, view::Hook};
 use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
-    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, UserScript, WatcherGuard, WebView, WebViewConfig, WebViewController,
-    WebViewEvent,
+    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, NavigationPolicy, OriginPolicy,
+    ScriptInjectionTime, ScriptMessageHandler, UserScript, WatcherGuard, WebView, WebViewConfig,
+    WebViewController, WebViewEvent, stay_on_origin,
 };
 
 /// How long one wait may take before the check gives up.
@@ -292,7 +292,12 @@ struct Page<'a> {
 
 impl<'a> Page<'a> {
     fn open(engine: &'a Engine) -> Self {
+        Self::open_with(engine, None)
+    }
+
+    fn open_with(engine: &'a Engine, navigation_policy: Option<NavigationPolicy>) -> Self {
         let mut config = WebViewConfig::default();
+        config.navigation_policy = navigation_policy;
         config.bridge_origins = OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/"));
         config.scripts = vec![UserScript::new(
             "waterui:test-state-seed",
@@ -846,7 +851,80 @@ const CHECKS: [Check; 10] = [
         "the_chromium_cdp_asset_origin_serves_bundled_content",
         the_chromium_cdp_asset_origin_serves_bundled_content,
     ),
+    (
+        "the_navigation_policy_keeps_the_view_on_its_origin",
+        the_navigation_policy_keeps_the_view_on_its_origin,
+    ),
 ];
+
+/// The navigation policy answers page-initiated navigations while the
+/// application's own loads keep working.
+///
+/// `stay_on_origin` sends a `window.location` jump off the view's origin out —
+/// the shared layer opens it externally and answers "cancel" — so the view has
+/// to stay put, on a document whose bridge still works. A subframe's own load
+/// is a navigation too, and the request it produces has to arrive as one:
+/// `is_main_frame` false, and allowed rather than cancelled.
+fn the_navigation_policy_keeps_the_view_on_its_origin(engine: &Engine) {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let page = Page::open_with(
+        engine,
+        Some(NavigationPolicy::new({
+            let requests = std::sync::Arc::clone(&requests);
+            move |request| {
+                requests
+                    .lock()
+                    .expect("the policy record lock is poisoned")
+                    .push((request.url.as_str().to_owned(), request.is_main_frame));
+                stay_on_origin(request)
+            }
+        })),
+    );
+    page.open_page("/first");
+
+    // A page-initiated cross-origin jump is denied: the view stays where it
+    // was, and the denial must not wedge the page or its bridge — a fresh
+    // application-driven load after it both navigates and answers.
+    page.block_on(
+        page.webview
+            .run_javascript("window.location.assign('https://example.com/'); 'assigned'"),
+    )
+    .expect("the assignment evaluates");
+    for _ in 0..200 {
+        engine.step();
+    }
+    assert_eq!(
+        page.location(),
+        engine.url("/first").as_str(),
+        "a page-initiated cross-origin navigation moved the view"
+    );
+    page.open_page("/second");
+
+    // A subframe's own load reaches the policy as a subframe and is allowed
+    // through — `stay_on_origin` admits every non-main-frame navigation.
+    page.block_on(
+        page.webview.run_javascript(
+            "document.body.innerHTML = '<iframe src=\"/first\"></iframe>'; 'framed'",
+        ),
+    )
+    .expect("the iframe injects");
+    page.wait_for("the subframe's navigation to reach the policy", || {
+        requests
+            .lock()
+            .expect("the policy record lock is poisoned")
+            .iter()
+            .any(|(url, is_main_frame)| !is_main_frame && url.ends_with("/first"))
+            .then_some(())
+    });
+    assert!(
+        requests
+            .lock()
+            .expect("the policy record lock is poisoned")
+            .iter()
+            .any(|(url, is_main_frame)| *is_main_frame && url.contains("example.com")),
+        "the cross-origin main-frame request never reached the policy"
+    );
+}
 
 fn main() {
     // Chromium launches its GPU, network and renderer processes by re-executing

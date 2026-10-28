@@ -282,6 +282,8 @@ struct PageState {
     redirects_enabled: RefCell<Computed<bool>>,
     #[cfg(feature = "webview")]
     current_url: RefCell<Option<Url>>,
+    #[cfg(feature = "webview")]
+    navigation_policy: RefCell<Option<waterui_webview::NavigationPolicy>>,
     #[cfg(feature = "chromium")]
     close_waiters: RefCell<Vec<oneshot::Sender<Result<(), CefCdpError>>>>,
     #[cfg(feature = "chromium")]
@@ -308,6 +310,8 @@ impl PageState {
             redirects_enabled: RefCell::new(Computed::constant(true)),
             #[cfg(feature = "webview")]
             current_url: RefCell::new(None),
+            #[cfg(feature = "webview")]
+            navigation_policy: RefCell::new(None),
             #[cfg(feature = "chromium")]
             close_waiters: RefCell::new(Vec::new()),
             #[cfg(feature = "chromium")]
@@ -617,11 +621,34 @@ fn new_life_span_handler(state: Rc<PageState>) -> LifeSpanHandler {
                 if let Some(target_url) =
                     popup_navigation_target(user_gesture, target_url.as_deref())
                 {
-                    browser
-                        .expect("CEF popup request must identify its opener browser")
-                        .main_frame()
-                        .expect("CEF popup opener must expose its main frame")
-                        .load_url(Some(&target_url.into()));
+                    // A popup rerouted into the main frame is a page-initiated
+                    // main-frame navigation, so the policy decides it here;
+                    // `load_url` itself always reports `FROM_API` and bypasses
+                    // `on_before_browse`'s policy check.
+                    #[cfg(feature = "webview")]
+                    let allowed = {
+                        let policy = self.state.navigation_policy.borrow().clone();
+                        let from = self.state.current_url.borrow().clone();
+                        policy.is_none_or(|policy| {
+                            policy.allows(&waterui_webview::NavigationRequest::new(
+                                target_url
+                                    .parse::<Url>()
+                                    .expect("CEF popup target URL must be a valid WaterUI URL"),
+                                from,
+                                true,
+                                user_gesture == 1,
+                            ))
+                        })
+                    };
+                    #[cfg(not(feature = "webview"))]
+                    let allowed = true;
+                    if allowed {
+                        browser
+                            .expect("CEF popup request must identify its opener browser")
+                            .main_frame()
+                            .expect("CEF popup opener must expose its main frame")
+                            .load_url(Some(&target_url.into()));
+                    }
                 }
 
                 // ChromiumView has no independent native-window surface. Allowing
@@ -669,37 +696,71 @@ fn new_request_handler(state: Rc<PageState>) -> RequestHandler {
                 _browser: Option<&mut Browser>,
                 frame: Option<&mut Frame>,
                 request: Option<&mut Request>,
-                _user_gesture: std::os::raw::c_int,
+                user_gesture: std::os::raw::c_int,
                 is_redirect: std::os::raw::c_int,
             ) -> std::os::raw::c_int {
                 #[cfg(not(feature = "webview"))]
                 {
-                    let _ = (frame, request, is_redirect);
+                    let _ = (frame, request, user_gesture, is_redirect);
                     return 0;
                 }
                 #[cfg(feature = "webview")]
                 {
                 let frame = frame.expect("CEF navigation must identify a frame");
-                if frame.is_main() != 1 {
-                    return 0;
-                }
                 let request = request.expect("CEF navigation must contain a request");
                 let destination: Url = CefString::from(&request.url())
                     .to_string()
                     .parse()
                     .expect("CEF navigation URL must be a valid WaterUI URL");
+                let is_main = frame.is_main() == 1;
+                // Redirects answer to `redirects_enabled`, not to the
+                // navigation policy.
                 if is_redirect == 1 {
-                    if let Some(source) = self.state.current_url.borrow().clone() {
-                        self.state.emit_webview(WebViewEvent::Redirect {
-                            from: source,
-                            to: destination.clone(),
-                        });
+                    if is_main {
+                        if let Some(source) = self.state.current_url.borrow().clone() {
+                            self.state.emit_webview(WebViewEvent::Redirect {
+                                from: source,
+                                to: destination.clone(),
+                            });
+                        }
+                        if !self.state.redirects_enabled.borrow().snapshot() {
+                            return 1;
+                        }
+                        self.state.current_url.replace(Some(destination));
                     }
-                    if !self.state.redirects_enabled.borrow().snapshot() {
-                        return 1;
-                    }
+                    return 0;
                 }
-                self.state.current_url.replace(Some(destination));
+                // `FROM_API` marks a load a browser entry point issued —
+                // `load_url`/`navigate` — which the policy must not see.
+                // Page-initiated loads (links, `window.location`, subframes)
+                // lack it.
+                let from_api = request.transition_type().get_raw()
+                    & cef::TransitionType::FROM_API_FLAG.get_raw()
+                    != 0;
+                let from = CefString::from(&frame.url()).to_string();
+                let from = if from.is_empty() {
+                    None
+                } else {
+                    Some(
+                        from.parse()
+                            .expect("CEF navigation source URL must be a valid WaterUI URL"),
+                    )
+                };
+                let policy = self.state.navigation_policy.borrow().clone();
+                if !from_api
+                    && let Some(policy) = policy
+                    && !policy.allows(&waterui_webview::NavigationRequest::new(
+                        destination.clone(),
+                        from,
+                        is_main,
+                        user_gesture == 1,
+                    ))
+                {
+                    return 1;
+                }
+                if is_main {
+                    self.state.current_url.replace(Some(destination));
+                }
                 0
                 }
             }
@@ -1312,6 +1373,11 @@ impl CefPageHandle {
     #[cfg(feature = "webview")]
     pub(crate) fn set_redirects_enabled(&self, enabled: Computed<bool>) {
         self.state.redirects_enabled.replace(enabled);
+    }
+
+    #[cfg(feature = "webview")]
+    pub(crate) fn set_navigation_policy(&self, policy: Option<waterui_webview::NavigationPolicy>) {
+        self.state.navigation_policy.replace(policy);
     }
 }
 

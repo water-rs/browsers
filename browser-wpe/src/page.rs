@@ -500,6 +500,32 @@ impl WpePage {
         };
     }
 
+    /// Installs `policy` as the page's navigation policy, or clears it.
+    ///
+    /// The bridge answers `decide-policy` synchronously through the callback
+    /// this installs: the policy sees every page-initiated navigation action
+    /// and vetoing one ignores the decision in the engine.
+    pub fn set_navigation_policy(&self, policy: Option<waterui_webview::NavigationPolicy>) {
+        let (callback, user_data, destroy) = policy.map_or((None, None, None), |policy| {
+            let boxed = Box::into_raw(Box::new(policy)).cast::<c_void>();
+            (
+                Some(policy_callback as crate::abi::PolicyCallback),
+                Some(boxed),
+                Some(destroy_navigation_policy as crate::abi::DestroyNotify),
+            )
+        });
+        // SAFETY: `user_data` is the boxed policy the bridge frees through
+        // `destroy` when the page dies or the policy is replaced.
+        unsafe {
+            (self.inner.state.api.api.page_set_navigation_policy)(
+                self.inner.raw.as_ptr(),
+                callback,
+                user_data.map_or(std::ptr::null_mut(), |data| data),
+                destroy,
+            );
+        }
+    }
+
     /// Chooses which documents may reach the bridge.
     pub fn set_bridge_origins(&self, policy: waterui_webview::OriginPolicy) {
         let wire = Self::string(policy.wire().as_str(), "WPE bridge origin policy");
@@ -866,6 +892,60 @@ fn bytes_response(bytes: Vec<u8>) -> WaterWpeBytes {
     };
     let _ = Box::into_raw(response);
     payload
+}
+
+unsafe extern "C" fn destroy_navigation_policy(policy: *mut c_void) {
+    // SAFETY: `policy` is the boxed `NavigationPolicy` the page handed over;
+    // see the module safety note.
+    unsafe {
+        drop(Box::from_raw(
+            policy.cast::<waterui_webview::NavigationPolicy>(),
+        ))
+    };
+}
+
+/// Answers one navigation action the bridge's `decide-policy` routed here.
+///
+/// The request the policy sees mirrors the shared contract: `url` is the
+/// navigation's target, `from` the committed document it leaves (null while
+/// no document is committed), and the two flags are the engine's own reports.
+/// Application-directed loads never arrive: the bridge marks them with its
+/// own `pendingAPIRequestURL` reproduction and answers them itself.
+unsafe extern "C" fn policy_callback(
+    policy: *mut c_void,
+    url: *const c_char,
+    from: *const c_char,
+    is_main_frame: bool,
+    user_gesture: bool,
+) -> bool {
+    // SAFETY: `policy` is the live boxed `NavigationPolicy` the page installed;
+    // `url` is a NUL-terminated string and `from` is one or null, both valid
+    // for this call.
+    let (policy, url, from) = unsafe {
+        (
+            &*policy.cast::<waterui_webview::NavigationPolicy>(),
+            CStr::from_ptr(url).to_string_lossy(),
+            if from.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(from).to_string_lossy())
+            },
+        )
+    };
+    let url = url
+        .parse::<Url>()
+        .expect("WPE navigation URL must be a valid WaterUI URL");
+    let from = from.filter(|value| !value.is_empty()).map(|value| {
+        value
+            .parse::<Url>()
+            .expect("WPE navigation source URL must be a valid WaterUI URL")
+    });
+    policy.allows(&waterui_webview::NavigationRequest::new(
+        url,
+        from,
+        is_main_frame,
+        user_gesture,
+    ))
 }
 
 unsafe extern "C" fn destroy_asset_server(server: *mut c_void) {

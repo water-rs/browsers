@@ -5,8 +5,7 @@ description: >-
   Clang as CC/CXX for the rest of the job. The jammy archive stops at Clang 15,
   and apt.llvm.org is where upstream's own SDK takes newer ones from. The
   calling step's own `apt-get update` and install pick the source up; the
-  package to install is exported as CLANG_PACKAGE and the source file as
-  CLANG_APT_SOURCE, for a caller that refreshes only the sources it names.
+  package to install is exported as CLANG_PACKAGE.
   The pin is read beside this action, so a repository that checks browsers
   out under a subdirectory can use it unchanged.
 runs:
@@ -25,5 +24,4 @@ runs:
           echo "CLANG_PACKAGE=clang-$major"
           echo "CC=clang-$major"
           echo "CXX=clang++-$major"
-          echo "CLANG_APT_SOURCE=$source"
         } >> "$GITHUB_ENV"

@@ -63,9 +63,9 @@ use waterui_browser_wpe::{WpePage, WpeRuntime, WpeRuntimePaths, WpeWebViewHandle
 use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
-    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, OriginPolicy, ScriptInjectionTime,
-    ScriptMessageHandler, UserScript, WatcherGuard, WebViewConfig, WebViewEvent,
-    WebViewHandle as _,
+    BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, NavigationPolicy, OriginPolicy,
+    ScriptInjectionTime, ScriptMessageHandler, UserScript, WatcherGuard, WebViewConfig,
+    WebViewEvent, WebViewHandle as _, stay_on_origin,
 };
 
 /// Names the staged WPE runtime root these tests drive.
@@ -220,6 +220,11 @@ fn runtime_paths() -> WpeRuntimePaths {
 impl RealEngine {
     /// Starts the server, initializes the runtime and opens one page.
     fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    /// Starts the same engine with `policy` installed on the view's config.
+    fn start_with(navigation_policy: Option<NavigationPolicy>) -> Self {
         // Criticals go fatal before any runtime work starts, and the scope
         // restores the mask only after every engine field has dropped.
         let paths = runtime_paths();
@@ -262,6 +267,7 @@ impl RealEngine {
                 .parse()
                 .expect("the local page server address is a URL"),
         );
+        config.navigation_policy = navigation_policy;
         let handle = WpeWebViewHandle::new(page, config);
 
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -740,6 +746,73 @@ fn page_teardown_disconnects_retained_emitters_and_closes_assets() {
     }
 }
 
+/// The navigation policy answers page-initiated navigations while the
+/// application's own loads keep working.
+///
+/// `stay_on_origin` sends a `window.location` jump off the view's origin out —
+/// the shared layer opens it externally and answers "cancel" — so the view has
+/// to stay put, on a document whose bridge still works. A subframe's own load
+/// is a navigation too, and the request it produces has to arrive as one:
+/// `is_main_frame` false, and allowed rather than cancelled.
+fn the_navigation_policy_keeps_the_view_on_its_origin() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let engine = RealEngine::start_with(Some(NavigationPolicy::new({
+        let requests = std::sync::Arc::clone(&requests);
+        move |request| {
+            requests
+                .lock()
+                .expect("the policy record lock is poisoned")
+                .push((request.url.as_str().to_owned(), request.is_main_frame));
+            stay_on_origin(request)
+        }
+    })));
+    engine.open("/first");
+
+    // A page-initiated cross-origin jump is denied: the view stays where it
+    // was, and the denial must not wedge the page or its bridge — a fresh
+    // application-driven load after it both navigates and answers.
+    engine
+        .block_on(
+            engine
+                .handle
+                .run_javascript("window.location.assign('https://example.com/'); 'assigned'"),
+        )
+        .expect("the assignment evaluates");
+    for _ in 0..200 {
+        engine.step();
+    }
+    assert_eq!(
+        engine.location(),
+        engine.url("/first").as_str(),
+        "a page-initiated cross-origin navigation moved the view"
+    );
+    engine.open("/second");
+
+    // A subframe's own load reaches the policy as a subframe and is allowed
+    // through — `stay_on_origin` admits every non-main-frame navigation.
+    engine
+        .block_on(engine.handle.run_javascript(
+            "document.body.innerHTML = '<iframe src=\"/first\"></iframe>'; 'framed'",
+        ))
+        .expect("the iframe injects");
+    engine.wait_for("the subframe's navigation to reach the policy", || {
+        requests
+            .lock()
+            .expect("the policy record lock is poisoned")
+            .iter()
+            .any(|(url, is_main_frame)| !is_main_frame && url.ends_with("/first"))
+            .then_some(())
+    });
+    assert!(
+        requests
+            .lock()
+            .expect("the policy record lock is poisoned")
+            .iter()
+            .any(|(url, is_main_frame)| *is_main_frame && url.contains("example.com")),
+        "the cross-origin main-frame request never reached the policy"
+    );
+}
+
 fn main() {
     let mut args = Arguments::from_args();
     // libtest-mimic runs trials inline on the calling thread only when it is
@@ -764,6 +837,7 @@ fn main() {
         integers_beyond_two_to_the_fifty_third_cross_intact_both_ways,
         a_background_timer_reaches_the_bridge_without_input_or_rendering,
         page_teardown_disconnects_retained_emitters_and_closes_assets,
+        the_navigation_policy_keeps_the_view_on_its_origin,
     ];
     libtest_mimic::run(&args, trials).exit();
 }

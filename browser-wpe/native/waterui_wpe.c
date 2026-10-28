@@ -82,6 +82,19 @@ struct WaterWpePage {
     /* The page's `waterui://localhost` binding, borrowed from its context's
      * scheme registration, or NULL while the page serves no assets. */
     WaterWpeAssetBinding *asset_binding;
+    /* The page's navigation-policy callback, or NULL while no policy decides
+     * page-initiated navigations. `user_data` is released by `destroy` with
+     * the page. */
+    WaterWpePolicyCallback policy_callback;
+    void *policy_user_data;
+    WaterWpeDestroyNotify policy_destroy;
+    /* The URI a bridge navigation call last asked the engine to load, in the
+     * canonical form a navigation decision's request reports. WebKit keeps
+     * the same marker internally as `pendingAPIRequestURL` to tell an
+     * application-directed load from a page-initiated one; the GLib API does
+     * not expose it, so the bridge tracks its own. NULL when no
+     * application-directed load is in flight. */
+    char *pending_api_uri;
     gboolean redirects_enabled;
     char *last_uri;
     char *bridge_origin_wire;
@@ -696,6 +709,9 @@ static void water_wpe_load_changed(
         uri = "about:blank";
     switch (event) {
     case WEBKIT_LOAD_STARTED:
+        /* A provisional load retires the pending API request. */
+        g_free(page->pending_api_uri);
+        page->pending_api_uri = NULL;
         g_free(page->last_uri);
         page->last_uri = g_strdup(uri);
         page->event_callback(
@@ -759,14 +775,53 @@ static gboolean water_wpe_decide_policy(
     WebKitPolicyDecisionType type,
     WaterWpePage *page)
 {
-    (void)web_view;
     if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
         return FALSE;
+    WebKitNavigationPolicyDecision *navigation =
+        WEBKIT_NAVIGATION_POLICY_DECISION(decision);
     WebKitNavigationAction *action =
-        webkit_navigation_policy_decision_get_navigation_action(
-            WEBKIT_NAVIGATION_POLICY_DECISION(decision));
-    if (webkit_navigation_action_is_redirect(action) &&
-        !page->redirects_enabled) {
+        webkit_navigation_policy_decision_get_navigation_action(navigation);
+    const char *url = webkit_uri_request_get_uri(
+        webkit_navigation_policy_decision_get_request(navigation));
+    /* WebKit's own test for an application-directed load, in
+     * `WebPageProxy::decidePolicyForNavigationAction`, is
+     * `request.url() == pendingAPIRequestURL`; `pending_api_uri` reproduces
+     * that marker. A decision for a navigation the API did not issue retires
+     * it, like WebKit's `clearPendingAPIRequest` — a redirect decision is a
+     * navigation action like any other for this. */
+    gboolean from_api =
+        page->pending_api_uri && strcmp(url, page->pending_api_uri) == 0;
+    if (!from_api) {
+        g_free(page->pending_api_uri);
+        page->pending_api_uri = NULL;
+    }
+    /* Redirects answer to `redirects_enabled`, not to the navigation policy. */
+    if (webkit_navigation_action_is_redirect(action)) {
+        if (!page->redirects_enabled) {
+            webkit_policy_decision_ignore(decision);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    if (from_api) {
+        webkit_policy_decision_use(decision);
+        return TRUE;
+    }
+    if (!page->policy_callback)
+        return FALSE;
+    /* `get_frame_name` names the frame the action targets: a named target or
+     * an embedded frame's generated name is non-NULL, while a navigation
+     * staying in its own frame reports NULL. The main frame is the target
+     * exactly when no other frame is named. */
+    gboolean is_main_frame =
+        webkit_navigation_policy_decision_get_frame_name(navigation) == NULL;
+    gboolean allow = page->policy_callback(
+        page->policy_user_data,
+        url,
+        webkit_web_view_get_uri(web_view),
+        is_main_frame,
+        webkit_navigation_action_is_user_gesture(action));
+    if (!allow) {
         webkit_policy_decision_ignore(decision);
         return TRUE;
     }
@@ -783,6 +838,9 @@ static gboolean water_wpe_load_failed(
     (void)web_view;
     (void)event;
     (void)failing_uri;
+    /* A failed load retires the pending API request. */
+    g_free(page->pending_api_uri);
+    page->pending_api_uri = NULL;
     page->event_callback(
         page->user_data,
         WATER_WPE_EVENT_LOAD_FAILED,
@@ -1020,6 +1078,11 @@ void water_wpe_page_free(WaterWpePage *page)
          * binding stays allocated, owned by the context's registration. */
         water_wpe_asset_binding_close(page->asset_binding);
     }
+    /* The policy callback holds the page's own Rust closure; it closes before
+     * the page's destructors run so a policy can never call freed state. */
+    if (page->policy_destroy) {
+        page->policy_destroy(page->policy_user_data);
+    }
     ((WaterView *)page->view)->page = NULL;
     wpe_view_closed(page->view);
     wpe_toplevel_closed(page->toplevel);
@@ -1029,6 +1092,7 @@ void water_wpe_page_free(WaterWpePage *page)
     g_object_unref(page->content_manager);
     g_hash_table_unref(page->scripts);
     page->destroy_user_data(page->user_data);
+    g_free(page->pending_api_uri);
     g_free(page->last_uri);
     g_free(page->bridge_origin_wire);
     g_free(page);
@@ -1049,6 +1113,28 @@ static void water_wpe_bridge_origins_sent(
         g_debug("failed to update WPE web-process bridge origins: %s", error->message);
         g_error_free(error);
     }
+}
+
+void water_wpe_page_set_navigation_policy(
+    WaterWpePage *page,
+    WaterWpePolicyCallback callback,
+    void *user_data,
+    WaterWpeDestroyNotify destroy)
+{
+    g_assert(page != NULL);
+    /* Close the previous callback before installing the new one, matching the
+     * asset binding's close-then-replace order so a freed closure is never
+     * invoked. */
+    WaterWpeDestroyNotify previous_destroy = page->policy_destroy;
+    void *previous_user_data = page->policy_user_data;
+    page->policy_callback = NULL;
+    page->policy_user_data = NULL;
+    page->policy_destroy = NULL;
+    if (previous_destroy)
+        previous_destroy(previous_user_data);
+    page->policy_callback = callback;
+    page->policy_user_data = user_data;
+    page->policy_destroy = destroy;
 }
 
 void water_wpe_page_set_bridge_origins(WaterWpePage *page, const char *wire)
@@ -1254,18 +1340,62 @@ void water_wpe_page_set_asset_server(
     water_wpe_asset_binding_close(&previous);
 }
 
+/* Arms `pending_api_uri` with the URI an application-directed navigation is
+ * about to target, so the next navigation decision recognizes it as the
+ * bridge's own. The decision's request reports the canonical URL —
+ * "https://example.com" reaches `decide-policy` as "https://example.com/" —
+ * so the string goes through a URI request's parser here to compare equal.
+ * `webkit_uri_request_new` decodes Latin-1 where `load_uri` decodes UTF-8;
+ * the two differ only for raw non-ASCII input, which is stored verbatim —
+ * WebKit keeps such URIs as given for the non-special schemes the bridge
+ * serves. */
+static void water_wpe_set_pending_api_uri(WaterWpePage *page, const char *uri)
+{
+    g_free(page->pending_api_uri);
+    page->pending_api_uri = NULL;
+    if (!uri)
+        return;
+    const guchar *byte = (const guchar *)uri;
+    while (*byte < 128 && *byte)
+        byte++;
+    if (*byte) {
+        page->pending_api_uri = g_strdup(uri);
+        return;
+    }
+    WebKitURIRequest *request = webkit_uri_request_new(uri);
+    const char *canonical = webkit_uri_request_get_uri(request);
+    if (canonical)
+        page->pending_api_uri = g_strdup(canonical);
+    g_object_unref(request);
+}
+
 void water_wpe_page_load_uri(WaterWpePage *page, const char *uri)
 {
+    water_wpe_set_pending_api_uri(page, uri);
     webkit_web_view_load_uri(page->web_view, uri);
 }
 
 void water_wpe_page_go_back(WaterWpePage *page)
 {
+    WebKitBackForwardListItem *item = webkit_back_forward_list_get_back_item(
+        webkit_web_view_get_back_forward_list(page->web_view));
+    if (!item)
+        return;
+    water_wpe_set_pending_api_uri(
+        page,
+        webkit_back_forward_list_item_get_uri(item));
     webkit_web_view_go_back(page->web_view);
 }
 
 void water_wpe_page_go_forward(WaterWpePage *page)
 {
+    WebKitBackForwardListItem *item = webkit_back_forward_list_get_forward_item(
+        webkit_web_view_get_back_forward_list(page->web_view));
+    if (!item)
+        return;
+    water_wpe_set_pending_api_uri(
+        page,
+        webkit_back_forward_list_item_get_uri(item));
     webkit_web_view_go_forward(page->web_view);
 }
 
@@ -1276,6 +1406,9 @@ void water_wpe_page_stop(WaterWpePage *page)
 
 void water_wpe_page_reload(WaterWpePage *page)
 {
+    water_wpe_set_pending_api_uri(
+        page,
+        webkit_web_view_get_uri(page->web_view));
     webkit_web_view_reload(page->web_view);
 }
 

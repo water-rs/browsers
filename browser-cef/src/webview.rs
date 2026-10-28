@@ -73,6 +73,7 @@ impl CefWebViewHandle {
     /// authenticates every call against the same admission rules, because the
     /// CDP binding reaches every context of every frame regardless.
     fn new(page: CefPageHandle, config: &WebViewConfig) -> Self {
+        page.set_navigation_policy(config.navigation_policy.clone());
         let handlers = Rc::new(RefCell::new(HashMap::<String, Rc<MessageHandler>>::new()));
         let origins = config.bridge_origins.clone();
         let contexts = Rc::new(RefCell::new(HashMap::<i64, TrackedContext>::new()));

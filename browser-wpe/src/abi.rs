@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 pub const MAX_PLANES: usize = 4;
 /// `WATER_WPE_FRAME_DMA_BUF`: the frame carries exported DMA-BUF planes.
 pub const FRAME_KIND_DMA_BUF: c_uint = 0;
@@ -115,6 +115,12 @@ pub struct WaterWpeAssetResponse {
 pub type AssetCallback =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> WaterWpeAssetResponse;
 
+/// Answers one page-initiated navigation decision synchronously: target URL,
+/// the document it leaves (null before the first commit), the main-frame flag,
+/// and the user-gesture flag. `false` keeps the engine from proceeding.
+pub type PolicyCallback =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, bool, bool) -> bool;
+
 pub struct WpeApi {
     pub runtime_new: unsafe extern "C" fn(*mut *mut c_char) -> *mut WaterWpeRuntime,
     pub runtime_free: unsafe extern "C" fn(*mut WaterWpeRuntime),
@@ -138,6 +144,12 @@ pub struct WpeApi {
     pub page_free: unsafe extern "C" fn(*mut WaterWpePage),
     pub page_set_asset_server:
         unsafe extern "C" fn(*mut WaterWpePage, AssetCallback, *mut c_void, DestroyNotify),
+    pub page_set_navigation_policy: unsafe extern "C" fn(
+        *mut WaterWpePage,
+        Option<PolicyCallback>,
+        *mut c_void,
+        Option<DestroyNotify>,
+    ),
     pub page_set_bridge_origins: unsafe extern "C" fn(*mut WaterWpePage, *const c_char),
     pub page_get_web_process_identifier:
         unsafe extern "C" fn(*mut WaterWpePage, ResultCallback, *mut c_void),
@@ -218,6 +230,10 @@ impl WpeApi {
                 page_new: symbol(library, b"water_wpe_page_new\0"),
                 page_free: symbol(library, b"water_wpe_page_free\0"),
                 page_set_asset_server: symbol(library, b"water_wpe_page_set_asset_server\0"),
+                page_set_navigation_policy: symbol(
+                    library,
+                    b"water_wpe_page_set_navigation_policy\0",
+                ),
                 page_set_bridge_origins: symbol(library, b"water_wpe_page_set_bridge_origins\0"),
                 page_get_web_process_identifier: symbol(
                     library,
@@ -397,10 +413,10 @@ mod tests {
 
     /// The loader asserts `abi_version() == ABI_VERSION` before it resolves any
     /// other symbol, so pinning the constant pins which bridge generations are
-    /// accepted: ABI 5 added the tagged frame kinds and the readiness export,
-    /// and a bridge still answering 4 is rejected at load.
+    /// accepted: ABI 6 added the navigation-policy callback, and a bridge still
+    /// answering 5 is rejected at load.
     #[test]
-    fn the_expected_abi_version_is_five() {
-        assert_eq!(ABI_VERSION, 5);
+    fn the_expected_abi_version_is_six() {
+        assert_eq!(ABI_VERSION, 6);
     }
 }
