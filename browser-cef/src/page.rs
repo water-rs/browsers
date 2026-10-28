@@ -345,12 +345,14 @@ impl PageState {
             }
             return false;
         }
-        // `FROM_API` marks a load a browser entry point issued —
-        // `load_url`/`navigate` — which the policy must not see.
-        // Page-initiated loads (links, `window.location`, subframes)
-        // lack it.
-        let from_api =
-            request.transition_type().get_raw() & cef::TransitionType::FROM_API_FLAG.get_raw() != 0;
+        // `DIRECT_LOAD` marks a load the application issued — the creation
+        // URL, `load_url`/`navigate` — which the policy must not see.
+        // Page-initiated loads (links, `window.location`, subframes) lack it.
+        // `FROM_API` is not that signal: CEF sets it only for Chrome-style
+        // browsers, as the embedder defines it.
+        let from_api = request.transition_type().get_raw()
+            & cef::TransitionType::DIRECT_LOAD_FLAG.get_raw()
+            != 0;
         let from = CefString::from(&frame.url()).to_string();
         let from = if from.is_empty() {
             None
@@ -716,7 +718,7 @@ fn new_life_span_handler(state: Rc<PageState>) -> LifeSpanHandler {
                 {
                     // A popup rerouted into the main frame is a page-initiated
                     // main-frame navigation, so the policy decides it here;
-                    // `load_url` itself always reports `FROM_API` and bypasses
+                    // `load_url` itself reports `DIRECT_LOAD` and bypasses
                     // `on_before_browse`'s policy check.
                     #[cfg(feature = "webview")]
                     let allowed = {
