@@ -284,6 +284,11 @@ struct PageState {
     current_url: RefCell<Option<Url>>,
     #[cfg(feature = "webview")]
     navigation_policy: RefCell<Option<waterui_webview::NavigationPolicy>>,
+    // The main-frame URL `OnBeforeBrowse` last cancelled. CEF reports that
+    // cancellation as an `ERR_ABORTED` load error, which is the decision the
+    // view made, not a failure to report.
+    #[cfg(feature = "webview")]
+    cancelled_url: RefCell<Option<String>>,
     #[cfg(feature = "chromium")]
     close_waiters: RefCell<Vec<oneshot::Sender<Result<(), CefCdpError>>>>,
     #[cfg(feature = "chromium")]
@@ -296,6 +301,22 @@ impl PageState {
     /// Answers CEF's `OnBeforeBrowse`: whether the navigation is cancelled.
     #[cfg(feature = "webview")]
     fn before_browse(
+        &self,
+        frame: &Frame,
+        request: &Request,
+        user_gesture: bool,
+        is_redirect: bool,
+    ) -> bool {
+        let cancel = self.decide_browse(frame, request, user_gesture, is_redirect);
+        if cancel && frame.is_main() == 1 {
+            self.cancelled_url
+                .replace(Some(CefString::from(&request.url()).to_string()));
+        }
+        cancel
+    }
+
+    #[cfg(feature = "webview")]
+    fn decide_browse(
         &self,
         frame: &Frame,
         request: &Request,
@@ -376,6 +397,8 @@ impl PageState {
             current_url: RefCell::new(None),
             #[cfg(feature = "webview")]
             navigation_policy: RefCell::new(None),
+            #[cfg(feature = "webview")]
+            cancelled_url: RefCell::new(None),
             #[cfg(feature = "chromium")]
             close_waiters: RefCell::new(Vec::new()),
             #[cfg(feature = "chromium")]
@@ -638,7 +661,13 @@ fn new_load_handler(state: Rc<PageState>) -> LoadHandler {
                 #[cfg(feature = "webview")]
                 {
                     let frame = _frame.expect("CEF load error must identify a frame");
-                    if frame.is_main() == 1 {
+                    let failed_url = _failed_url.map(ToString::to_string);
+                    let cancelled_here = _error_code == cef::Errorcode::ABORTED
+                        && failed_url.is_some()
+                        && *self.state.cancelled_url.borrow() == failed_url;
+                    if cancelled_here {
+                        self.state.cancelled_url.replace(None);
+                    } else if frame.is_main() == 1 {
                         self.state.emit_webview(WebViewEvent::Error(
                             WebViewError::LoadFailed(
                                 _error_text
