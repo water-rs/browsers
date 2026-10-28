@@ -17,8 +17,15 @@ categories = ["gui", "web-programming"]
 # it. Because it travels with the published crate, a consumer — the `water` CLI,
 # which resolves which runtime artifact to download — reads the pin belonging to
 # the exact crate version it depends on rather than keeping a copy of its own.
+#
+# `identity` names the packaged runtime built for this exact source: WPE Real
+# Engine publishes it as the `wpe-runtime-<version>-<identity>` release of this
+# repository, beside the `browser-runtime-manifest.json` a consumer downloads it
+# through. `runtime/identity.py` computes it from everything that decides the
+# archive's contents, and CI fails a change that leaves it stale.
 [package.metadata.waterui.wpe-runtime]
 version = "2.54.2"
+identity = "d6117ebfbc001792"
 bridge-abi = 5
 native-source = "native"
 
