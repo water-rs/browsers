@@ -104,8 +104,8 @@ use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, NavigationDecision, NavigationPolicy,
-    OriginPolicy, ScriptInjectionTime, ScriptMessageHandler, UserScript, WatcherGuard, WebView,
-    WebViewConfig, WebViewController, WebViewEvent, stay_on_origin,
+    OriginPolicy, ScriptInjectionTime, ScriptMessageHandler, StateDeclarations, UserScript,
+    WatcherGuard, WebView, WebViewConfig, WebViewController, WebViewEvent, stay_on_origin,
 };
 
 /// How long one wait may take before the check gives up.
@@ -296,14 +296,17 @@ impl<'a> Page<'a> {
     }
 
     fn open_with(engine: &'a Engine, navigation_policy: Option<NavigationPolicy>) -> Self {
-        let mut config = WebViewConfig::default();
-        config.navigation_policy = navigation_policy;
-        config.bridge_origins = OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/"));
-        config.scripts = vec![UserScript::new(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        )];
+        let config = WebViewConfig::new(
+            None,
+            OriginPolicy::new(BridgeOrigins::Initial, &engine.url("/")),
+            navigation_policy,
+            vec![UserScript::new(
+                "waterui:test-state-seed",
+                STATE_SEED_JS,
+                ScriptInjectionTime::DocumentStart,
+            )],
+            StateDeclarations::default(),
+        );
         let webview = engine.controller.open_with(config);
         let handle = webview.handle();
 
@@ -878,8 +881,8 @@ fn the_navigation_policy_keeps_the_view_on_its_origin(engine: &Engine) {
                     .lock()
                     .expect("the policy record lock is poisoned")
                     .push((
-                        request.url.as_str().to_owned(),
-                        request.is_main_frame,
+                        request.url().as_str().to_owned(),
+                        request.is_main_frame(),
                         decision,
                     ));
                 match decision {

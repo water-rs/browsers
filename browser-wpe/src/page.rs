@@ -821,7 +821,7 @@ unsafe extern "C" fn message_callback(
     if !allowed {
         tracing::warn!(
             origin = %origin.to_string_lossy(),
-            handler = %request.name,
+            handler = %request.name(),
             "a document outside the bridge origin policy tried to call a WaterUI handler"
         );
         reply.return_json(
@@ -831,20 +831,20 @@ unsafe extern "C" fn message_callback(
         return;
     }
 
-    let handler = state.handlers.borrow().get(&request.name).map(Rc::clone);
+    let handler = state.handlers.borrow().get(request.name()).map(Rc::clone);
     let Some(handler) = handler else {
         tracing::warn!(
-            handler = %request.name,
+            handler = %request.name(),
             "page script called a WaterUI handler that is not registered"
         );
         reply.return_json(
-            &bridge::Reply::failure(&format!("no WaterUI handler named `{}`", request.name))
+            &bridge::Reply::failure(&format!("no WaterUI handler named `{}`", request.name()))
                 .to_json(),
         );
         return;
     };
 
-    let future = handler(&request.payload);
+    let future = handler(request.payload());
     executor_core::spawn_local(async move {
         let response = match future.await {
             Ok(reply) => bridge::Reply::from(reply),
@@ -905,14 +905,14 @@ unsafe extern "C" fn asset_callback(
     // asset contract uses; header names and values can never contain a
     // newline, so the lines form is lossless.
     let mut headers = String::new();
-    for (name, value) in &response.headers {
+    for (name, value) in response.headers() {
         use std::fmt::Write as _;
         let _ = writeln!(headers, "{}: {}", name.as_str(), value.as_str());
     }
     WaterWpeAssetResponse {
-        status: u32::from(response.status),
+        status: u32::from(response.status()),
         headers: bytes_response(headers.into_bytes()),
-        body: bytes_response(response.body),
+        body: bytes_response(response.body().to_vec()),
     }
 }
 

@@ -171,11 +171,11 @@ struct SourceTexture {
 impl TexturePresenter {
     pub(super) fn new(context: &Context<'_>) -> Self {
         let shader = context
-            .device
+            .device()
             .create_shader_module(wgpu::include_wgsl!("cef_blit.wgsl"));
         let bind_group_layout =
             context
-                .device
+                .device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("waterui_cef_bind_group_layout"),
                     entries: &[
@@ -209,14 +209,14 @@ impl TexturePresenter {
                 });
         let pipeline_layout =
             context
-                .device
+                .device()
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("waterui_cef_pipeline_layout"),
                     bind_group_layouts: &[Some(&bind_group_layout)],
                     immediate_size: 0,
                 });
         let pipeline = context
-            .device
+            .device()
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("waterui_cef_pipeline"),
                 layout: Some(&pipeline_layout),
@@ -231,7 +231,7 @@ impl TexturePresenter {
                     entry_point: Some("fragment_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: context.format,
+                        format: context.format(),
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -242,7 +242,7 @@ impl TexturePresenter {
                 multiview_mask: None,
                 cache: None,
             });
-        let sampler = context.device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("waterui_cef_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -252,12 +252,12 @@ impl TexturePresenter {
             pipeline,
             bind_group_layout,
             sampler,
-            target_format: context.format,
+            target_format: context.format(),
             source: None,
             popup: None,
             popup_rect: None,
-            view_rect_buffer: create_rect_buffer(context.device, "waterui_cef_view_rect"),
-            popup_rect_buffer: create_rect_buffer(context.device, "waterui_cef_popup_rect"),
+            view_rect_buffer: create_rect_buffer(context.device(), "waterui_cef_view_rect"),
+            popup_rect_buffer: create_rect_buffer(context.device(), "waterui_cef_popup_rect"),
         }
     }
 

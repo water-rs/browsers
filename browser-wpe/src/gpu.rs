@@ -130,7 +130,7 @@ struct BrowserGpuContent {
 
 impl GpuContent for BrowserGpuContent {
     fn setup(&mut self, context: &Context<'_>) {
-        self.shared.lock().redraw = Some(context.redraw.clone());
+        self.shared.lock().redraw = Some(context.redraw().clone());
         self.gpu = Some(create_gpu_state(context));
     }
 
@@ -468,13 +468,13 @@ fn encode_browser_blit(
 }
 
 fn create_gpu_state(context: &Context<'_>) -> GpuState {
-    let importer = DmaBufImporter::new(context.device, context.queue, context.adapter);
+    let importer = DmaBufImporter::new(context.device(), context.queue(), context.adapter());
     let shader = context
-        .device
+        .device()
         .create_shader_module(wgpu::include_wgsl!("wpe_blit.wgsl"));
     let bind_group_layout =
         context
-            .device
+            .device()
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("waterui_wpe_bind_group_layout"),
                 entries: &[
@@ -506,15 +506,16 @@ fn create_gpu_state(context: &Context<'_>) -> GpuState {
                     },
                 ],
             });
-    let pipeline_layout = context
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waterui_wpe_pipeline_layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
+    let pipeline_layout =
+        context
+            .device()
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("waterui_wpe_pipeline_layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
     let pipeline = context
-        .device
+        .device()
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("waterui_wpe_pipeline"),
             layout: Some(&pipeline_layout),
@@ -529,7 +530,7 @@ fn create_gpu_state(context: &Context<'_>) -> GpuState {
                 entry_point: Some("fragment_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: context.format,
+                    format: context.format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -542,16 +543,16 @@ fn create_gpu_state(context: &Context<'_>) -> GpuState {
         });
     GpuState {
         importer,
-        target_format: context.format,
+        target_format: context.format(),
         pipeline,
         bind_group_layout,
-        sampler: context.device.create_sampler(&wgpu::SamplerDescriptor {
+        sampler: context.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("waterui_wpe_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }),
-        options: context.device.create_buffer(&wgpu::BufferDescriptor {
+        options: context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("waterui_wpe_options"),
             size: FrameOptions::SIZE.get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,

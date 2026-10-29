@@ -57,11 +57,11 @@ impl RendererBundle {
     /// The bundle a view created with `config` hands its renderers.
     pub fn new(config: &WebViewConfig) -> Self {
         Self {
-            rules: config.bridge_origins.wire().to_string(),
+            rules: config.bridge_origins().wire().to_string(),
             scripts: config
                 .user_scripts()
                 .iter()
-                .map(|script| document_source(&script.source, script.time))
+                .map(|script| document_source(script.source(), script.time()))
                 .collect(),
         }
     }

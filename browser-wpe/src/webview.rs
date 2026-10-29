@@ -103,7 +103,7 @@ impl WpeController {
 
 impl CustomWebViewController for WpeController {
     fn open(&self, config: WebViewConfig) -> impl WebViewHandle {
-        WpeWebViewHandle::new(WpePage::new(self.runtime()), config)
+        WpeWebViewHandle::new(WpePage::new(self.runtime()), &config)
     }
 
     fn asset_origin(&self) -> Option<Url> {
@@ -160,18 +160,18 @@ impl WpeWebViewHandle {
     /// page's web context, the admission rules, the bridge and the
     /// creation-time scripts.
     #[must_use]
-    pub fn new(page: WpePage, config: WebViewConfig) -> Self {
+    pub fn new(page: WpePage, config: &WebViewConfig) -> Self {
         page.install_bridge_scripts();
         for script in config.user_scripts() {
             page.add_script(
-                &script.key,
-                &script.source,
-                script.time == ScriptInjectionTime::DocumentEnd,
+                script.key(),
+                script.source(),
+                script.time() == ScriptInjectionTime::DocumentEnd,
             );
         }
-        page.set_bridge_origins(config.bridge_origins);
-        if let Some(server) = config.asset_server {
-            page.set_asset_server(server);
+        page.set_bridge_origins(config.bridge_origins().clone());
+        if let Some(server) = config.asset_server() {
+            page.set_asset_server(server.clone());
         }
         Self {
             page,

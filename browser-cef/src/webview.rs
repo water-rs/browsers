@@ -73,9 +73,9 @@ impl CefWebViewHandle {
     /// authenticates every call against the same admission rules, because the
     /// CDP binding reaches every context of every frame regardless.
     fn new(page: CefPageHandle, config: &WebViewConfig) -> Self {
-        page.set_navigation_policy(config.navigation_policy.clone());
+        page.set_navigation_policy(config.navigation_policy().cloned());
         let handlers = Rc::new(RefCell::new(HashMap::<String, Rc<MessageHandler>>::new()));
-        let origins = config.bridge_origins.clone();
+        let origins = config.bridge_origins().clone();
         let contexts = Rc::new(RefCell::new(HashMap::<i64, TrackedContext>::new()));
         let main_frame = Rc::new(RefCell::new(None::<String>));
         let scripts = Rc::new(RefCell::new(HashMap::<String, String>::new()));
@@ -387,8 +387,8 @@ impl CustomWebViewController for CefController {
         let handle = CefWebViewHandle::new(page, &config);
         // The factory goes onto the page's private request context before any
         // asset URL can navigate — the view still sits on `about:blank` here.
-        if let Some(server) = config.asset_server {
-            crate::assets::register_scheme_handler(&handle.page.request_context(), server);
+        if let Some(server) = config.asset_server() {
+            crate::assets::register_scheme_handler(&handle.page.request_context(), server.clone());
         }
         handle
     }
@@ -542,17 +542,18 @@ fn dispatch_bridge_call(
         .expect("an admitted bridge call comes from a tracked execution context");
     // Resolve the handler and release the borrow before invoking it: a handler is
     // free to register or remove handlers on the same web view.
-    let handler = handlers.borrow().get(&request.name).map(Rc::clone);
+    let handler = handlers.borrow().get(request.name()).map(Rc::clone);
     let Some(handler) = handler else {
         tracing::warn!(
-            handler = %request.name,
+            handler = %request.name(),
             "page script called a WaterUI handler that is not registered"
         );
-        let reply = bridge::Reply::failure(&format!("no WaterUI handler named `{}`", request.name));
+        let reply =
+            bridge::Reply::failure(&format!("no WaterUI handler named `{}`", request.name()));
         execute_without_result(
             session,
             &protocol::Evaluate {
-                expression: &reply.resolve_script(request.id),
+                expression: &reply.resolve_script(request.id()),
                 await_promise: false,
                 return_by_value: false,
                 unique_context_id: Some(unique_context_id.as_str()),
@@ -563,7 +564,7 @@ fn dispatch_bridge_call(
 
     // Handlers are asynchronous, so the promise settles when the future
     // completes rather than when the transport returns.
-    let future = handler(&request.payload);
+    let future = handler(request.payload());
     let session = session.clone();
     executor_core::spawn_local(async move {
         let reply = match future.await {
@@ -573,7 +574,7 @@ fn dispatch_bridge_call(
         execute_without_result(
             &session,
             &protocol::Evaluate {
-                expression: &reply.resolve_script(request.id),
+                expression: &reply.resolve_script(request.id()),
                 await_promise: false,
                 return_by_value: false,
                 unique_context_id: Some(unique_context_id.as_str()),
