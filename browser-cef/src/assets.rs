@@ -93,7 +93,7 @@ fn new_scheme_handler_factory(server: AssetServer) -> SchemeHandlerFactory {
                     .map_or_else(assets::AssetResponse::not_found, |(path, query)| {
                         assets::dispatch(&self.server, &method, path, query)
                     });
-                Some(new_resource_handler(response))
+                Some(new_resource_handler(&response))
             }
         }
     }
@@ -104,7 +104,7 @@ fn new_scheme_handler_factory(server: AssetServer) -> SchemeHandlerFactory {
 /// them on dedicated response fields rather than inside the header map.
 fn mime_type(response: &assets::AssetResponse) -> Option<(String, Option<String>)> {
     let (_, value) = response
-        .headers
+        .headers()
         .iter()
         .find(|(name, _)| name.as_str().eq_ignore_ascii_case("content-type"))?;
     let mut parts = value.as_str().split(';');
@@ -119,7 +119,7 @@ fn mime_type(response: &assets::AssetResponse) -> Option<(String, Option<String>
     clippy::transmute_ptr_to_ptr,
     reason = "CEF wrapper macros generate ABI pointer casts outside WaterUI's control"
 )]
-fn new_resource_handler(response: assets::AssetResponse) -> ResourceHandler {
+fn new_resource_handler(response: &assets::AssetResponse) -> ResourceHandler {
     wrap_resource_handler! {
         struct AssetResourceHandler {
             status: c_int,
@@ -224,9 +224,9 @@ fn new_resource_handler(response: assets::AssetResponse) -> ResourceHandler {
         }
     }
     AssetResourceHandler::new(
-        c_int::from(response.status),
-        mime_type(&response),
-        response.headers,
-        RefCell::new(Cursor::new(response.body)),
+        c_int::from(response.status()),
+        mime_type(response),
+        response.headers().to_vec(),
+        RefCell::new(Cursor::new(response.body().to_vec())),
     )
 }

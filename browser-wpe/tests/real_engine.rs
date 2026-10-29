@@ -250,19 +250,19 @@ impl RealEngine {
         // application opened at this URL is granted its own origin, which is
         // what `BridgeOrigins::Initial` means — handed in the same way
         // `WpeController::open` hands it, through the view's config.
-        let mut config = WebViewConfig::default();
-        config.scripts = vec![UserScript::new(
-            "waterui:test-state-seed",
-            STATE_SEED_JS,
-            ScriptInjectionTime::DocumentStart,
-        )];
-        config.bridge_origins = OriginPolicy::new(
-            BridgeOrigins::Initial,
-            &base
-                .parse()
-                .expect("the local page server address is a URL"),
-        );
-        let handle = WpeWebViewHandle::new(page, config);
+        let config = WebViewConfig::default()
+            .with_scripts(vec![UserScript::new(
+                "waterui:test-state-seed",
+                STATE_SEED_JS,
+                ScriptInjectionTime::DocumentStart,
+            )])
+            .with_bridge_origins(OriginPolicy::new(
+                BridgeOrigins::Initial,
+                &base
+                    .parse()
+                    .expect("the local page server address is a URL"),
+            ));
+        let handle = WpeWebViewHandle::new(page, &config);
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({

@@ -72,11 +72,11 @@ impl CefGpuContent {
 impl GpuContent for CefGpuContent {
     fn setup(&mut self, context: &Context<'_>) {
         self.mailbox.set_gpu_handles(GpuHandles {
-            adapter: context.adapter.clone(),
-            device: context.device.clone(),
-            queue: context.queue.clone(),
+            adapter: context.adapter().clone(),
+            device: context.device().clone(),
+            queue: context.queue().clone(),
         });
-        let redraw = context.redraw.clone();
+        let redraw = context.redraw().clone();
         self.mailbox.set_waker(move || redraw.request_redraw());
         self.presenter = Some(TexturePresenter::new(context));
     }
