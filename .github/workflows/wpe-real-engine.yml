@@ -286,6 +286,8 @@ jobs:
     # Creates the identity's release and its tag; nothing here pushes a commit.
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v8
@@ -293,6 +295,19 @@ jobs:
           pattern: wpe-runtime-*
           path: runtime-artifacts
           merge-multiple: true
+      - name: Generate the runtime manifest
+        env:
+          TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          browser-wpe/runtime/generate-manifest.py \
+            --base-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            --output runtime-artifacts/browser-runtime-manifest.json \
+            runtime-artifacts/*.artifact.json
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            runtime-artifacts/*.zip
+            runtime-artifacts/browser-runtime-manifest.json
       # `gh release create` uploads the assets to a draft and publishes it once
       # all of them are there, so a consumer never sees a release without its
       # manifest, and it fails when the tag already exists rather than touching
@@ -304,10 +319,6 @@ jobs:
           VERSION: ${{ needs.identity.outputs.version }}
           IDENTITY: ${{ needs.identity.outputs.identity }}
         run: |
-          browser-wpe/runtime/generate-manifest.py \
-            --base-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG" \
-            --output runtime-artifacts/browser-runtime-manifest.json \
-            runtime-artifacts/*.artifact.json
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
             --prerelease \
