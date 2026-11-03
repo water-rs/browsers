@@ -25,7 +25,7 @@ categories = ["gui", "web-programming"]
 # archive's contents, and CI fails a change that leaves it stale.
 [package.metadata.waterui.wpe-runtime]
 version = "2.54.2"
-identity = "d6117ebfbc001792"
+identity = "f8748c1a2661a5ae"
 bridge-abi = 5
 native-source = "native"
 
