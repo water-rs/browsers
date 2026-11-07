@@ -12,7 +12,7 @@
 //! itself asks it. `waterui-graphics` requests the adapter every GPU surface
 //! runs on with `force_fallback_adapter: false`, and the realization asserts on
 //! that adapter the backend its import is built on: `wgpu-external-frame`'s
-//! `DmaBufImporter` needs Vulkan or EGL/GLES, and its `shared_handle` needs
+//! `DmaBufImporter` is used on Vulkan alone, and its `shared_handle` needs
 //! Direct3D 12. A machine with no GPU still answers with a real adapter, of
 //! device type `Cpu` — Mesa's llvmpipe on Linux, Direct3D's WARP on Windows.
 //! Both rasterize on the processor and have no GPU allocation to export. That
@@ -37,8 +37,8 @@ struct Import {
 
 #[cfg(target_os = "linux")]
 const IMPORT: Import = Import {
-    backends: &[wgpu::Backend::Vulkan, wgpu::Backend::Gl],
-    requirement: "importing a CEF DMA-BUF needs Vulkan or EGL/GLES",
+    backends: &[wgpu::Backend::Vulkan],
+    requirement: "importing a CEF DMA-BUF needs Vulkan",
 };
 
 #[cfg(target_os = "windows")]

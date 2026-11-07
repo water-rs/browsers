@@ -1,14 +1,24 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 use cef::{AcceleratedPaintInfo, ColorType, PaintElementType, Rect};
-use waterui_graphics::gpu::GpuContentView;
+use objc2::rc::autoreleasepool;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
+use objc2_io_surface::{
+    IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceHeight, kIOSurfacePixelFormat,
+    kIOSurfaceWidth,
+};
+use objc2_metal::{
+    MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType,
+    MTLTextureUsage,
+};
+use waterui_graphics::cherenkov_gpu::interop::metal::import_texture;
+use waterui_graphics::gpu::FrameOutput;
 use wgpu_external_frame::io_surface::{PackedFormat, PackedIoSurfaceFrame};
 
-use super::presenter::{GpuHandles, OwnedFrameMailbox, copy_source_texture};
-use super::{CefGpuContent, CefUiBridge};
-use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
+use super::pool::PoolSlot;
+use super::publisher::{FramePublisher, FrameSlot, SLOT_USAGE, SlotAllocator, submit_copy};
+use crate::{AcceleratedFrameSink, CefPopupRect};
 
 // # Safety
 //
@@ -18,6 +28,11 @@ use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
 // immediately afterwards. Everything here therefore either runs inside that
 // call, or operates on the surface this module retained during it. Sites that
 // depend on something else say so.
+
+/// `kCVPixelFormatType_32BGRA`.
+const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+/// `kCVPixelFormatType_32RGBA`.
+const PIXEL_FORMAT_RGBA: u32 = u32::from_be_bytes(*b"RGBA");
 
 struct CefIoSurface {
     /// The retained surface, at the allocated extent it must be imported as.
@@ -69,10 +84,127 @@ impl CefIoSurface {
     }
 }
 
-struct MacFrameSink {
+/// A pool slot backed by an `IOSurface` of its own, so the frame it carries
+/// stays promotable to a system compositor plane.
+struct IoSurfaceSlot {
+    surface: CFRetained<IOSurfaceRef>,
+    texture: wgpu::Texture,
+    extent: (u32, u32),
+    format: wgpu::TextureFormat,
+}
+
+impl PoolSlot for IoSurfaceSlot {
+    fn extent(&self) -> (u32, u32) {
+        self.extent
+    }
+
+    fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+
+    /// A compositor plane keeps displaying the surface after the engine has
+    /// released the frame, and `IOSurfaceIsInUse` is how the system says so.
+    fn in_system_use(&self) -> bool {
+        self.surface.is_in_use()
+    }
+}
+
+impl FrameSlot for IoSurfaceSlot {
+    fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+}
+
+struct IoSurfaceAllocator {
+    device: wgpu::Device,
+}
+
+impl SlotAllocator for IoSurfaceAllocator {
+    type Slot = IoSurfaceSlot;
+
+    fn allocate(&self, extent: (u32, u32), format: wgpu::TextureFormat) -> IoSurfaceSlot {
+        let (pixel_format, metal_format) = match format {
+            wgpu::TextureFormat::Bgra8Unorm => (PIXEL_FORMAT_BGRA, MTLPixelFormat::BGRA8Unorm),
+            wgpu::TextureFormat::Rgba8Unorm => (PIXEL_FORMAT_RGBA, MTLPixelFormat::RGBA8Unorm),
+            format => panic!("CEF produced {format:?}, which has no IOSurface slot"),
+        };
+        let surface = create_surface(extent, pixel_format);
+        let raw = autoreleasepool(|_| {
+            // SAFETY: the handle is only borrowed to read the raw `MTLDevice`, and
+            // it is not kept past this closure.
+            let hal_device = unsafe {
+                self.device
+                    .as_hal::<wgpu::hal::api::Metal>()
+                    .expect("IOSurface slots require a Metal device")
+            };
+            let raw_device = hal_device.raw_device();
+            let descriptor = MTLTextureDescriptor::new();
+            // SAFETY: plain setters on a descriptor this scope just allocated and
+            // owns.
+            unsafe {
+                descriptor.setWidth(usize::try_from(extent.0).expect("slot width fits usize"));
+                descriptor.setHeight(usize::try_from(extent.1).expect("slot height fits usize"));
+            }
+            descriptor.setTextureType(MTLTextureType::Type2D);
+            descriptor.setPixelFormat(metal_format);
+            descriptor.setUsage(MTLTextureUsage::ShaderRead);
+            // A texture aliasing an `IOSurface` is `Shared` where memory is
+            // unified and `Managed` on a discrete GPU.
+            descriptor.setStorageMode(if raw_device.hasUnifiedMemory() {
+                MTLStorageMode::Shared
+            } else {
+                MTLStorageMode::Managed
+            });
+            raw_device
+                .newTextureWithDescriptor_iosurface_plane(&descriptor, &surface, 0)
+                .unwrap_or_else(|| {
+                    panic!("Metal rejected an IOSurface slot of {extent:?} as {format:?}")
+                })
+        });
+        // SAFETY: `raw` was just created on the `MTLDevice` this `wgpu` device
+        // wraps, with the pixel format `format` names. Its `ShaderRead` usage
+        // is all `TEXTURE_BINDING` needs, and the blits `COPY_DST` and
+        // `COPY_SRC` stand for need no `MTLTextureUsage`. The slot owns the
+        // texture, and a frame sampling it holds the pool's claim on the slot,
+        // so it is not written while a frame that can be in flight shows it.
+        let texture = unsafe { import_texture(&self.device, raw, format, SLOT_USAGE) };
+        IoSurfaceSlot {
+            surface,
+            texture,
+            extent,
+            format,
+        }
+    }
+}
+
+/// Allocates a non-planar `IOSurface` of 4-byte pixels.
+fn create_surface((width, height): (u32, u32), pixel_format: u32) -> CFRetained<IOSurfaceRef> {
+    let number = |value: u32| CFNumber::new_i64(i64::from(value));
+    let (width, height, bytes_per_element) = (number(width), number(height), number(4));
+    let pixel_format = CFNumber::new_i64(i64::from(pixel_format));
+    // SAFETY: IOSurface defines these keys as immutable `CFString`s that live for
+    // the whole process.
+    let keys = unsafe {
+        [
+            kIOSurfaceWidth,
+            kIOSurfaceHeight,
+            kIOSurfaceBytesPerElement,
+            kIOSurfacePixelFormat,
+        ]
+    };
+    let properties = CFDictionary::<CFString, CFNumber>::from_slices(
+        &keys,
+        &[&width, &height, &bytes_per_element, &pixel_format],
+    );
+    // SAFETY: `properties` is a live dictionary of the keys and value types
+    // `IOSurfaceCreate` documents.
+    unsafe { IOSurfaceRef::new(properties.as_opaque()) }.expect("IOSurfaceCreate failed")
+}
+
+pub(super) struct MacFrameSink {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    mailbox: Arc<OwnedFrameMailbox>,
+    publisher: FramePublisher<IoSurfaceAllocator>,
     imported_size: Cell<(u32, u32)>,
 }
 
@@ -96,49 +228,38 @@ impl AcceleratedFrameSink for MacFrameSink {
             );
         }
         let source = surface.surface.import(&self.device);
-        let owned = copy_source_texture(
-            &self.device,
-            &self.queue,
-            &source,
-            wgpu::Extent3d {
-                width: surface.visible_width,
-                height: surface.visible_height,
-                depth_or_array_layers: 1,
-            },
+        let visible = (surface.visible_width, surface.visible_height);
+        self.publisher.paint(
+            element,
+            visible,
             surface.surface.format().texture_format(),
+            |destination| submit_copy(&self.device, &self.queue, &source, destination, visible),
         );
-        self.mailbox.publish(element, owned);
     }
 
     fn set_popup_rect(&self, rect: Option<CefPopupRect>) {
-        self.mailbox.set_popup_rect(rect);
+        self.publisher.set_popup_rect(rect);
     }
 }
 
-fn make_frame_sink(handles: GpuHandles, mailbox: Arc<OwnedFrameMailbox>) -> MacFrameSink {
+pub(super) fn make_frame_sink(output: FrameOutput) -> MacFrameSink {
     assert_eq!(
-        handles.adapter.get_info().backend,
+        output.shared_device().adapter.get_info().backend,
         wgpu::Backend::Metal,
         "CEF IOSurface composition requires WaterUI's Metal backend"
     );
     tracing::debug!("Installed the accelerated CEF frame sink");
+    let device = output.device().clone();
+    let queue = output.queue().clone();
     MacFrameSink {
-        device: handles.device,
-        queue: handles.queue,
-        mailbox,
+        publisher: FramePublisher::new(
+            output,
+            IoSurfaceAllocator {
+                device: device.clone(),
+            },
+        ),
+        device,
+        queue,
         imported_size: Cell::new((0, 0)),
     }
-}
-
-pub(super) fn gpu_view(page: CefPageHandle) -> GpuContentView {
-    let (content, shared) = CefGpuContent::new();
-    let bridge = RefCell::new(CefUiBridge::new(page, shared, make_frame_sink));
-    // No pump here. Chromium's message loop belongs to
-    // `CefRuntime::start_message_pump`, which Chromium itself paces; running
-    // `do_message_loop_work` inside the render callback put whatever the
-    // browser had queued — parsing, script, compositing — on the main thread
-    // inside one frame's budget, which is what tripped the stall probe every
-    // few seconds on an idle page. The UI hook installs the sink and requests
-    // the next compositor frame and nothing else.
-    GpuContentView::new(content).on_frame(move || bridge.borrow_mut().frame())
 }

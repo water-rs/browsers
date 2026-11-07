@@ -11,8 +11,8 @@
 //! The frames themselves are [`wgpu_external_frame::dma_buf::DmaBufFrame`]s:
 //! importing a dma-buf into a `wgpu` texture is a general problem, so it lives
 //! in a crate that knows nothing about WPE or `WaterUI`. What is WPE's is the
-//! buffer lease ([`WpeFrameLease`]) and the compositing view built on top
-//! ([`BrowserGpuView`]).
+//! buffer lease ([`WpeFrameLease`]) and the external-frame view built on top
+//! ([`BrowserGpuView`]), which presents each frame to the host in place.
 
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod abi;

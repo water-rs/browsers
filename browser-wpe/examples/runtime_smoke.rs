@@ -22,7 +22,7 @@ mod linux {
         BrowserFrameSource, BrowserGpuView, WPE_WEBKIT_VERSION, WpeRuntime, WpeRuntimePaths,
     };
     use waterui_graphics::cherenkov::{Display, FrameTime};
-    use waterui_graphics::gpu::{GpuContentRenderer, GpuRuntime};
+    use waterui_graphics::gpu::{ExternalFrameRenderer, GpuRuntime};
     use waterui_graphics::{OffscreenImage, OffscreenSize, RedrawHandle};
     use waterui_url::Url;
     use waterui_webview::{BridgeOrigins, JsReply, OriginPolicy};
@@ -122,20 +122,20 @@ mod linux {
         };
         let size = OffscreenSize::try_from_pixels(WIDTH, HEIGHT)
             .expect("WPE smoke viewport must be non-zero");
-        let mut view = BrowserGpuView::new(source).into_view();
-        let engine_content = view.take_engine_content();
+        let view = BrowserGpuView::new(source).into_view();
         let context = gpu_runtime.context();
         // One frame, read back at once: no host loop exists to wake.
-        let mut renderer = GpuContentRenderer::new(
+        let mut renderer = ExternalFrameRenderer::new(
             gpu_runtime,
             context.clone(),
-            engine_content,
+            &view.stream(),
             size,
             RedrawHandle::new(|| {}),
         )
         .expect("the smoke renderer's engine layer installs");
-        // The UI hook feeds the content's mailbox; run it before presenting so
-        // the smoke frame is queued for the render.
+        // The UI hook imports the smoke frame onto the output the renderer
+        // started the view's source with; run it before presenting so the
+        // frame is queued for the render.
         view.frame();
         let device = context.device();
         let target = device.create_texture(&wgpu::TextureDescriptor {
