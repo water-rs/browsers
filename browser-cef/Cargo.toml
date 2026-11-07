@@ -72,6 +72,20 @@ objc2-core-foundation = { version = "0.3", features = [
     "CFNumber",
     "CFString",
 ] }
+objc2-io-surface = { version = "0.3", default-features = false, features = [
+    "IOSurfaceRef",
+    "objc2-core-foundation",
+    "std",
+] }
+objc2-metal = { version = "0.3", default-features = false, features = [
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+    "objc2-io-surface",
+    "std",
+] }
 objc2-security = { version = "0.3", features = [
     "CSCommon",
     "SecCode",

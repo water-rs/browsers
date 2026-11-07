@@ -1,19 +1,17 @@
-use std::cell::RefCell;
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::rc::Rc;
-use std::sync::Arc;
 
 use cef::{AcceleratedPaintInfo, ColorType, PaintElementType, Rect};
-use waterui_graphics::gpu::GpuContentView;
+use waterui_graphics::gpu::FrameOutput;
 use wgpu_external_frame::dma_buf::{DmaBufFormat, DmaBufFrame, DmaBufImporter, DmaBufPlane};
 
-use super::presenter::{GpuHandles, OwnedFrameMailbox};
-use super::{CefGpuContent, CefUiBridge};
-use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
+use super::publisher::{FramePublisher, PlainAllocator};
+use crate::{AcceleratedFrameSink, CefPopupRect};
 
-struct LinuxFrameSink {
-    importer: Rc<DmaBufImporter>,
-    mailbox: Arc<OwnedFrameMailbox>,
+pub(super) struct LinuxFrameSink {
+    importer: DmaBufImporter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    publisher: FramePublisher<PlainAllocator>,
 }
 
 impl AcceleratedFrameSink for LinuxFrameSink {
@@ -50,7 +48,7 @@ impl AcceleratedFrameSink for LinuxFrameSink {
         } else {
             panic!("CEF returned unsupported Linux accelerated color format")
         };
-        let borrowed_frame = DmaBufFrame::new(
+        let mut borrowed_frame = DmaBufFrame::new(
             width,
             height,
             format,
@@ -66,55 +64,60 @@ impl AcceleratedFrameSink for LinuxFrameSink {
         // image at a coded size with alignment padding, and presenting that edge
         // to edge stretches the page and draws the gutter.
         let visible = &frame.extra.visible_rect;
-        let borrowed_frame = match (u32::try_from(visible.width), u32::try_from(visible.height)) {
-            (Ok(visible_width), Ok(visible_height))
-                if visible_width <= width && visible_height <= height =>
-            {
-                borrowed_frame.with_visible_size(visible_width, visible_height)
-            }
-            _ => borrowed_frame,
-        };
-        self.mailbox
-            .publish(element, self.importer.copy_to_texture(borrowed_frame));
+        if let (Ok(visible_width), Ok(visible_height)) =
+            (u32::try_from(visible.width), u32::try_from(visible.height))
+            && visible_width <= width
+            && visible_height <= height
+        {
+            borrowed_frame = borrowed_frame.with_visible_size(visible_width, visible_height);
+        }
+        self.publisher.paint(
+            element,
+            borrowed_frame.visible_size(),
+            format.texture_format(),
+            |destination| {
+                let import = self.importer.copy_into(&mut borrowed_frame, destination);
+                // The copy and the barriers around it go ahead of the encoder in
+                // one submission. CEF takes the DMA-BUF back when this callback
+                // returns and Vulkan does not order Chromium's next write behind
+                // our read, so the copy completes before the callback does.
+                let submission = self.queue.submit(
+                    import
+                        .command_buffers
+                        .into_iter()
+                        .chain([import.encoder.finish()]),
+                );
+                self.device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: None,
+                    })
+                    .expect("the CEF DMA-BUF copy failed");
+                borrowed_frame.presented();
+                drop(import.guard);
+            },
+        );
     }
 
     fn set_popup_rect(&self, rect: Option<CefPopupRect>) {
-        self.mailbox.set_popup_rect(rect);
+        self.publisher.set_popup_rect(rect);
     }
 }
 
-// `CefUiBridge::new` stores every platform's sink constructor behind one
-// `fn(GpuHandles, ...)` type, so this signature is fixed even though the
-// assert below only needs a borrow.
-#[allow(clippy::needless_pass_by_value)]
-fn make_frame_sink(handles: GpuHandles, mailbox: Arc<OwnedFrameMailbox>) -> LinuxFrameSink {
-    let GpuHandles {
-        adapter,
-        device,
-        queue,
-    } = handles;
-    assert!(
-        matches!(
-            adapter.get_info().backend,
-            wgpu::Backend::Vulkan | wgpu::Backend::Gl
-        ),
-        "CEF DMA-BUF composition requires WaterUI's Vulkan or EGL/GLES backend"
+pub(super) fn make_frame_sink(output: FrameOutput) -> LinuxFrameSink {
+    let shared = output.shared_device();
+    assert_eq!(
+        shared.adapter.get_info().backend,
+        wgpu::Backend::Vulkan,
+        "CEF DMA-BUF composition requires WaterUI's Vulkan backend"
     );
+    let importer = DmaBufImporter::new(&shared.device, &shared.queue, &shared.adapter);
+    let device = shared.device.clone();
+    let queue = shared.queue.clone();
     LinuxFrameSink {
-        importer: Rc::new(DmaBufImporter::new(&device, &queue, &adapter)),
-        mailbox,
+        importer,
+        device: device.clone(),
+        queue,
+        publisher: FramePublisher::new(output, PlainAllocator { device }),
     }
-}
-
-pub(super) fn gpu_view(page: CefPageHandle) -> GpuContentView {
-    let (content, shared) = CefGpuContent::new();
-    let bridge = RefCell::new(CefUiBridge::new(page, shared, make_frame_sink));
-    // No pump here. Chromium's message loop belongs to
-    // `CefRuntime::start_message_pump`, which Chromium itself paces; running
-    // `do_message_loop_work` inside the render callback put whatever the
-    // browser had queued — parsing, script, compositing — on the main thread
-    // inside one frame's budget, which is what tripped the stall probe every
-    // few seconds on an idle page. The UI hook installs the sink and requests
-    // the next compositor frame and nothing else.
-    GpuContentView::new(content).on_frame(move || bridge.borrow_mut().frame())
 }

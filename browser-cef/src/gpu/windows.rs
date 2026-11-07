@@ -1,19 +1,16 @@
-use std::cell::RefCell;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 use cef::{AcceleratedPaintInfo, ColorType, PaintElementType, Rect};
-use waterui_graphics::gpu::GpuContentView;
+use waterui_graphics::gpu::FrameOutput;
 use wgpu_external_frame::shared_handle::SharedHandleFrame;
 
-use super::presenter::{GpuHandles, OwnedFrameMailbox, copy_source_texture};
-use super::{CefGpuContent, CefUiBridge};
-use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
+use super::publisher::{FramePublisher, PlainAllocator, submit_copy};
+use crate::{AcceleratedFrameSink, CefPopupRect};
 
-struct WindowsFrameSink {
+pub(super) struct WindowsFrameSink {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    mailbox: Arc<OwnedFrameMailbox>,
+    publisher: FramePublisher<PlainAllocator>,
 }
 
 impl AcceleratedFrameSink for WindowsFrameSink {
@@ -45,47 +42,37 @@ impl AcceleratedFrameSink for WindowsFrameSink {
         // presenting the padded texture edge to edge stretches the page and
         // draws the gutter.
         let visible = &frame.extra.visible_rect;
-        let owned = copy_source_texture(
-            &self.device,
-            &self.queue,
-            &source,
-            wgpu::Extent3d {
-                width: u32::try_from(visible.width).unwrap_or(width).min(width),
-                height: u32::try_from(visible.height).unwrap_or(height).min(height),
-                depth_or_array_layers: 1,
-            },
-            format,
+        let extent = (
+            u32::try_from(visible.width).unwrap_or(width).min(width),
+            u32::try_from(visible.height).unwrap_or(height).min(height),
         );
-        self.mailbox.publish(element, owned);
+        self.publisher
+            .paint(element, extent, format, |destination| {
+                submit_copy(&self.device, &self.queue, &source, destination, extent);
+            });
     }
 
     fn set_popup_rect(&self, rect: Option<CefPopupRect>) {
-        self.mailbox.set_popup_rect(rect);
+        self.publisher.set_popup_rect(rect);
     }
 }
 
-fn make_frame_sink(handles: GpuHandles, mailbox: Arc<OwnedFrameMailbox>) -> WindowsFrameSink {
+pub(super) fn make_frame_sink(output: FrameOutput) -> WindowsFrameSink {
     assert_eq!(
-        handles.adapter.get_info().backend,
+        output.shared_device().adapter.get_info().backend,
         wgpu::Backend::Dx12,
         "CEF shared D3D texture composition requires WaterUI's Direct3D 12 backend"
     );
+    let device = output.device().clone();
+    let queue = output.queue().clone();
     WindowsFrameSink {
-        device: handles.device,
-        queue: handles.queue,
-        mailbox,
+        publisher: FramePublisher::new(
+            output,
+            PlainAllocator {
+                device: device.clone(),
+            },
+        ),
+        device,
+        queue,
     }
-}
-
-pub(super) fn gpu_view(page: CefPageHandle) -> GpuContentView {
-    let (content, shared) = CefGpuContent::new();
-    let bridge = RefCell::new(CefUiBridge::new(page, shared, make_frame_sink));
-    // No pump here. Chromium's message loop belongs to
-    // `CefRuntime::start_message_pump`, which Chromium itself paces; running
-    // `do_message_loop_work` inside the render callback put whatever the
-    // browser had queued — parsing, script, compositing — on the main thread
-    // inside one frame's budget, which is what tripped the stall probe every
-    // few seconds on an idle page. The UI hook installs the sink and requests
-    // the next compositor frame and nothing else.
-    GpuContentView::new(content).on_frame(move || bridge.borrow_mut().frame())
 }
