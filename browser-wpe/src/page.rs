@@ -398,7 +398,7 @@ impl WpePage {
         };
     }
 
-    /// Runs WebKit's paste editing command in the focused frame.
+    /// Runs `WebKit`'s paste editing command in the focused frame.
     ///
     /// The command pastes what the clipboard `WPEPlatform` reaches holds, as
     /// a real paste: the focused element receives a `paste` event.

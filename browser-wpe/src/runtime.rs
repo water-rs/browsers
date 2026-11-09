@@ -484,7 +484,7 @@ mod loader_order_tests {
         load_checked(
             || {
                 calls.borrow_mut().push("abi_version");
-                5
+                super::ABI_VERSION
             },
             || {
                 calls.borrow_mut().push("WpeApi::load");
