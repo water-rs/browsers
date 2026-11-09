@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 pub const MAX_PLANES: usize = 4;
 /// `WATER_WPE_FRAME_DMA_BUF`: the frame carries exported DMA-BUF planes.
 pub const FRAME_KIND_DMA_BUF: c_uint = 0;
@@ -154,8 +154,16 @@ pub struct WpeApi {
     pub page_set_user_agent: unsafe extern "C" fn(*mut WaterWpePage, *const c_char),
     pub page_resize: unsafe extern "C" fn(*mut WaterWpePage, c_uint, c_uint, c_double),
     pub page_set_focus: unsafe extern "C" fn(*mut WaterWpePage, bool),
-    pub page_pointer_button:
-        unsafe extern "C" fn(*mut WaterWpePage, bool, c_uint, c_double, c_double, c_uint, c_uint),
+    pub page_pointer_button: unsafe extern "C" fn(
+        *mut WaterWpePage,
+        bool,
+        c_uint,
+        c_double,
+        c_double,
+        c_uint,
+        c_uint,
+        c_uint,
+    ),
     pub page_pointer_move: unsafe extern "C" fn(
         *mut WaterWpePage,
         c_double,
@@ -177,6 +185,7 @@ pub struct WpeApi {
         c_uint,
     ),
     pub page_key: unsafe extern "C" fn(*mut WaterWpePage, bool, c_uint, c_uint, c_uint, c_uint),
+    pub page_paste: unsafe extern "C" fn(*mut WaterWpePage),
     pub page_add_script:
         unsafe extern "C" fn(*mut WaterWpePage, *const c_char, *const c_char, c_uint),
     pub page_set_cookie: unsafe extern "C" fn(*mut WaterWpePage, *const c_char),
@@ -243,6 +252,7 @@ impl WpeApi {
                 page_pointer_move: symbol(library, b"water_wpe_page_pointer_move\0"),
                 page_scroll: symbol(library, b"water_wpe_page_scroll\0"),
                 page_key: symbol(library, b"water_wpe_page_key\0"),
+                page_paste: symbol(library, b"water_wpe_page_paste\0"),
                 page_add_script: symbol(library, b"water_wpe_page_add_script\0"),
                 page_set_cookie: symbol(library, b"water_wpe_page_set_cookie\0"),
                 page_get_cookies: symbol(library, b"water_wpe_page_get_cookies\0"),
@@ -397,10 +407,10 @@ mod tests {
 
     /// The loader asserts `abi_version() == ABI_VERSION` before it resolves any
     /// other symbol, so pinning the constant pins which bridge generations are
-    /// accepted: ABI 5 added the tagged frame kinds and the readiness export,
-    /// and a bridge still answering 4 is rejected at load.
+    /// accepted: ABI 6 added the pointer click count and the paste command,
+    /// and a bridge still answering 5 is rejected at load.
     #[test]
-    fn the_expected_abi_version_is_five() {
-        assert_eq!(ABI_VERSION, 5);
+    fn the_expected_abi_version_is_six() {
+        assert_eq!(ABI_VERSION, 6);
     }
 }

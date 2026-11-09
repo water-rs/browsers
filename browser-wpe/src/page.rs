@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
@@ -364,13 +365,20 @@ impl WpePage {
         unsafe { (self.inner.state.api.api.page_set_focus)(self.inner.raw.as_ptr(), focused) };
     }
 
-    /// Sends a pointer button event.
+    /// Sends a pointer button event. `click_count` is the position in a
+    /// multi-click run, 1 for a single click, 2 for a double click; a release
+    /// carries the count of the press it ends.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "WPE pointer button event payload is atomic"
+    )]
     pub fn pointer_button(
         &self,
         pressed: bool,
         button: PointerButton,
         x: f64,
         y: f64,
+        click_count: NonZeroU32,
         modifiers: u32,
         time_ms: u32,
     ) {
@@ -383,10 +391,21 @@ impl WpePage {
                 button as u32,
                 x,
                 y,
+                click_count.get(),
                 modifiers,
                 time_ms,
             );
         };
+    }
+
+    /// Runs WebKit's paste editing command in the focused frame.
+    ///
+    /// The command pastes what the clipboard `WPEPlatform` reaches holds, as
+    /// a real paste: the focused element receives a `paste` event.
+    pub fn paste(&self) {
+        // SAFETY: bridge ABI call on the page this type owns; see the module safety
+        // note.
+        unsafe { (self.inner.state.api.api.page_paste)(self.inner.raw.as_ptr()) };
     }
 
     /// Sends a pointer movement event.

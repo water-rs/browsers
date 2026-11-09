@@ -159,7 +159,7 @@ mod linux {
                     scale: 1.0,
                     headroom: 1.0,
                 },
-                FrameTime(Instant::now()),
+                FrameTime::now(),
             )
             .expect("the smoke frame presents");
         let bytes_per_row = WIDTH * 4;

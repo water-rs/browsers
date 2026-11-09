@@ -17,12 +17,13 @@
 //!
 //! # Timestamps
 //!
-//! `WPEPlatform` timestamps every event, and `wpe_view_compute_press_count`
-//! reads them to turn two clicks into a double click. The surface vocabulary
-//! carries no timestamp, so the adapter keeps its own monotonic millisecond
-//! clock from the moment it is created. Only the differences matter to WPE, so
-//! a backend that has real platform event times loses nothing by not being able
-//! to pass them.
+//! `WPEPlatform` timestamps every event. The surface vocabulary carries no
+//! timestamp, so the adapter keeps its own monotonic millisecond clock from
+//! the moment it is created. Only the differences matter to WPE, so a backend
+//! that has real platform event times loses nothing by not being able to pass
+//! them. Click counting does not depend on them: the event carries the
+//! platform's own count, and the bridge hands it to `WPEPlatform` instead of
+//! recomputing one from these timestamps.
 //!
 //! # Input methods
 //!
@@ -34,12 +35,14 @@
 //! typed it. Pre-edit is therefore invisible in an embedded WPE page, and this
 //! adapter says so rather than pretending otherwise.
 
+use std::num::NonZeroU32;
 use std::str::FromStr as _;
 use std::time::Instant;
 
 use waterui_graphics::gpu::ExternalFrameView;
 use waterui_graphics::input::{
-    Code, Key, Modifiers, NamedKey, ScrollUnit, SurfaceInputEvent, SurfacePointerButton,
+    Code, GesturePhase, Key, Modifiers, NamedKey, ScrollPhase, ScrollUnit, SurfaceInputEvent,
+    SurfacePointerButton,
 };
 use xkeysym::{Keysym, key as xkb};
 
@@ -118,13 +121,14 @@ impl WpeSurfaceInput {
                 pressed,
                 button,
                 position,
-            } => self.pointer_button(*pressed, *button, position.x, position.y),
+                click_count,
+            } => self.pointer_button(*pressed, *button, position.x, position.y, *click_count),
             SurfaceInputEvent::Scroll {
                 position,
                 delta_x,
                 delta_y,
                 unit,
-                finished,
+                phase,
             } => self.page.scroll(
                 position.x,
                 position.y,
@@ -136,7 +140,7 @@ impl WpeSurfaceInput {
                 // notch is a step, and WebKit multiplies it by its own line
                 // height.
                 matches!(unit, ScrollUnit::Pixel),
-                *finished,
+                scroll_stopped(*phase),
                 self.modifiers(),
                 self.time_ms(),
             ),
@@ -162,11 +166,21 @@ impl WpeSurfaceInput {
             // every character twice; and the bridge ABI has no pre-edit call at
             // all (see the module docs), so a composition session stays
             // invisible until it commits.
-            SurfaceInputEvent::TextInput(_)
+            //
+            // `Resize` is dropped for a different reason: the page's size and
+            // scale already follow the presented frame (`gpu` calls
+            // `WpePage::resize` on every pass), which is the data it carries.
+            SurfaceInputEvent::Resize { .. }
+            | SurfaceInputEvent::TextInput(_)
             | SurfaceInputEvent::CompositionStart
             | SurfaceInputEvent::CompositionUpdate { .. }
             | SurfaceInputEvent::CompositionCancel => {}
             SurfaceInputEvent::CompositionCommit(text) => self.commit_text(text),
+            // The bridge runs WebKit's paste editing command, so the page sees
+            // a real `paste` event. The command reads the clipboard
+            // `WPEPlatform` reaches itself (the bridge has no call that takes
+            // text), which is the text this event carries.
+            SurfaceInputEvent::Paste(_) => self.page.paste(),
         }
     }
 
@@ -202,15 +216,29 @@ impl WpeSurfaceInput {
         );
     }
 
-    fn pointer_button(&mut self, pressed: bool, button: SurfacePointerButton, x: f64, y: f64) {
+    fn pointer_button(
+        &mut self,
+        pressed: bool,
+        button: SurfacePointerButton,
+        x: f64,
+        y: f64,
+        click_count: NonZeroU32,
+    ) {
         let (button, mask) = wpe_pointer_button(button);
         if pressed {
             self.buttons |= mask;
         } else {
             self.buttons &= !mask;
         }
-        self.page
-            .pointer_button(pressed, button, x, y, self.modifiers(), self.time_ms());
+        self.page.pointer_button(
+            pressed,
+            button,
+            x,
+            y,
+            click_count,
+            self.modifiers(),
+            self.time_ms(),
+        );
     }
 
     /// Types committed text as the keystrokes that would have produced it.
@@ -267,6 +295,24 @@ impl WpeInputGpuView {
         let input = std::cell::RefCell::new(self.input);
         self.view
             .on_input(move |event| input.borrow_mut().handle(event))
+    }
+}
+
+/// Whether a scroll delta ends its gesture in `WPEPlatform`'s terms.
+///
+/// `WPEPlatform`'s scroll event has one lifecycle bit, `is_stop`, set when the
+/// fingers lift (GDK's meaning), and no momentum representation: inertia
+/// arrives as ordinary precise deltas. So a contact sequence stops where it
+/// ends or is abandoned, momentum deltas are plain deltas that stop where the
+/// platform's inertia ends or is cancelled, and a discrete delta is a gesture
+/// of its own.
+const fn scroll_stopped(phase: ScrollPhase) -> bool {
+    match phase {
+        ScrollPhase::Discrete => true,
+        ScrollPhase::Contact(step) | ScrollPhase::Momentum(step) => match step {
+            GesturePhase::Started | GesturePhase::Moved => false,
+            GesturePhase::Ended | GesturePhase::Cancelled => true,
+        },
     }
 }
 
@@ -401,10 +447,21 @@ const fn handed(code: Code, left: u32, right: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Code, Key, Modifiers, NamedKey, SurfacePointerButton, keysym, named_keysym, wpe_modifiers,
-        wpe_pointer_button, xkb_keycode,
+        Code, GesturePhase, Key, Modifiers, NamedKey, ScrollPhase, SurfacePointerButton, keysym,
+        named_keysym, scroll_stopped, wpe_modifiers, wpe_pointer_button, xkb_keycode,
     };
     use crate::page::PointerButton;
+
+    #[test]
+    fn a_scroll_stops_where_its_contact_or_momentum_ends_and_a_discrete_delta_is_whole() {
+        assert!(scroll_stopped(ScrollPhase::Discrete));
+        for sequence in [ScrollPhase::Contact, ScrollPhase::Momentum] {
+            assert!(!scroll_stopped(sequence(GesturePhase::Started)));
+            assert!(!scroll_stopped(sequence(GesturePhase::Moved)));
+            assert!(scroll_stopped(sequence(GesturePhase::Ended)));
+            assert!(scroll_stopped(sequence(GesturePhase::Cancelled)));
+        }
+    }
 
     #[test]
     fn the_modifier_word_packs_the_keyboard_chord_into_its_low_bits() {
