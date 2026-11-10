@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define WATER_WPE_ABI_VERSION 5
+#define WATER_WPE_ABI_VERSION 6
 #ifdef WATER_WPE_EXPECTED_ABI_VERSION
 static_assert(WATER_WPE_ABI_VERSION == WATER_WPE_EXPECTED_ABI_VERSION,
     "WPE bridge ABI disagrees with the resolved browser package");
@@ -179,6 +179,7 @@ void water_wpe_page_pointer_button(
     uint32_t button,
     double x,
     double y,
+    uint32_t click_count,
     uint32_t modifiers,
     uint32_t time_ms);
 void water_wpe_page_pointer_move(
@@ -206,6 +207,9 @@ void water_wpe_page_key(
     uint32_t keyval,
     uint32_t modifiers,
     uint32_t time_ms);
+/* Runs WebKit's paste editing command in the focused frame: the page receives
+ * a `paste` event carrying what the clipboard WPEPlatform reaches holds. */
+void water_wpe_page_paste(WaterWpePage *page);
 /* Installs a document script under `key`, replacing whatever script that key
  * already names. The scripts are injected into the top frame only: the bridge is
  * a capability, and embedding a document does not grant it one. */

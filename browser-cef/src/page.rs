@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 #[cfg(feature = "chromium")]
 use std::future::Future;
+use std::num::NonZeroU32;
 #[cfg(feature = "chromium")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -1131,17 +1132,21 @@ impl CefPageHandle {
         );
     }
 
-    /// Sends one pointer button transition.
+    /// Sends one pointer button transition. `click_count` is the position in
+    /// a multi-click run, 1 for a single click, 2 for a double click; a
+    /// release carries the count of the press it ends.
     ///
     /// # Panics
     ///
-    /// Panics when either coordinate does not fit CEF's integer input ABI.
+    /// Panics when either coordinate does not fit CEF's integer input ABI, or
+    /// the click count exceeds `i32`.
     pub fn pointer_button(
         &self,
         pressed: bool,
         button: CefPointerButton,
         x: f64,
         y: f64,
+        click_count: NonZeroU32,
         modifiers: CefInputModifiers,
     ) {
         self.host.send_mouse_click_event(
@@ -1152,7 +1157,7 @@ impl CefPageHandle {
             }),
             button.native(),
             i32::from(!pressed),
-            1,
+            i32::try_from(click_count.get()).expect("CEF click count exceeds i32"),
         );
     }
 

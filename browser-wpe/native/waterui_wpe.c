@@ -1332,17 +1332,13 @@ void water_wpe_page_pointer_button(
     uint32_t button,
     double x,
     double y,
+    uint32_t click_count,
     uint32_t modifiers,
     uint32_t time_ms)
 {
+    g_assert_cmpuint(click_count, >, 0);
     WPEEventType type =
         pressed ? WPE_EVENT_POINTER_DOWN : WPE_EVENT_POINTER_UP;
-    guint press_count = wpe_view_compute_press_count(
-        page->view,
-        x,
-        y,
-        button,
-        time_ms);
     WPEEvent *event = wpe_event_pointer_button_new(
         type,
         page->view,
@@ -1352,7 +1348,7 @@ void water_wpe_page_pointer_button(
         button,
         x,
         y,
-        press_count);
+        click_count);
     wpe_view_event(page->view, event);
     wpe_event_unref(event);
 }
@@ -1424,6 +1420,13 @@ void water_wpe_page_key(
         keyval);
     wpe_view_event(page->view, event);
     wpe_event_unref(event);
+}
+
+void water_wpe_page_paste(WaterWpePage *page)
+{
+    webkit_web_view_execute_editing_command(
+        page->web_view,
+        WEBKIT_EDITING_COMMAND_PASTE);
 }
 
 void water_wpe_page_add_script(

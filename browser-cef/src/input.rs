@@ -5,7 +5,7 @@
 //! Chromium facts for itself: that a wheel notch is 120 units and the fraction
 //! left over has to be carried into the next event, that a keystroke needs a
 //! Windows virtual key *and* a platform hardware code, that the character a key
-//! types is what makes CEF emit a `char` event at all, and that ⌘Z/⌘X/⌘C/⌘V/⌘A
+//! types is what makes CEF emit a `char` event at all, and that ⌘Z/⌘X/⌘C/⌘A
 //! are frame commands rather than keystrokes on macOS. Three copies of that
 //! knowledge existed, and they had already drifted.
 //!
@@ -33,6 +33,8 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::str::FromStr as _;
+
+use std::num::NonZeroU32;
 
 use waterui_graphics::input::{
     Code, Key, Modifiers, NamedKey, ScrollUnit, SurfaceInputEvent, SurfacePointerButton,
@@ -116,14 +118,24 @@ impl CefSurfaceInput {
                 pressed,
                 button,
                 position,
-            } => self.pointer_button(*pressed, *button, position.x, position.y),
+                click_count,
+            } => self.pointer_button(*pressed, *button, position.x, position.y, *click_count),
+            // CEF's wheel ABI has no gesture phase: Chromium's windowless
+            // wheel event is a bare delta, so contact, momentum and discrete
+            // deltas all travel as the pixel or line motion they are, and the
+            // zero-motion event that ends a gesture is dropped in `scroll`.
             SurfaceInputEvent::Scroll {
                 position,
                 delta_x,
                 delta_y,
                 unit,
-                ..
+                phase: _,
             } => self.scroll(position.x, position.y, *delta_x, *delta_y, *unit),
+            // CEF can only paste what the system clipboard holds (`CefFrame::
+            // Paste` takes no text), which is the text this event carries.
+            // It is the frame's editing command, so the page sees a real
+            // `paste` event rather than typed characters.
+            SurfaceInputEvent::Paste(_) => self.page.paste(),
             SurfaceInputEvent::Key {
                 pressed,
                 key,
@@ -139,8 +151,13 @@ impl CefSurfaceInput {
                 self.apply_key_calls(calls);
             }
             // CEF has no "a composition began" call: the first pre-edit opens
-            // the session on the browser side.
-            SurfaceInputEvent::CompositionStart => {}
+            // the session on the browser side. `Resize` needs no call
+            // either: the page's viewport already follows the presented
+            // frame's size and scale on every host pass
+            // (`gpu::CefUiBridge::frame` calls `CefPageHandle::set_viewport`),
+            // the same data the event carries, and a second writer would only
+            // race it.
+            SurfaceInputEvent::CompositionStart | SurfaceInputEvent::Resize { .. } => {}
             SurfaceInputEvent::CompositionUpdate { text, caret } => {
                 let selection = composition_selection(text, *caret);
                 self.page.set_composition(text, selection, selection, None);
@@ -180,7 +197,14 @@ impl CefSurfaceInput {
         };
     }
 
-    fn pointer_button(&mut self, pressed: bool, button: SurfacePointerButton, x: f64, y: f64) {
+    fn pointer_button(
+        &mut self,
+        pressed: bool,
+        button: SurfacePointerButton,
+        x: f64,
+        y: f64,
+        click_count: NonZeroU32,
+    ) {
         let Some(button) = cef_pointer_button(button) else {
             // Chromium's OSR input ABI has three buttons; the side buttons are
             // navigation gestures instead, which is what a browser does with
@@ -200,7 +224,7 @@ impl CefSurfaceInput {
             CefPointerButton::Secondary => self.modifiers.secondary_button = pressed,
         }
         self.page
-            .pointer_button(pressed, button, x, y, self.modifiers);
+            .pointer_button(pressed, button, x, y, click_count, self.modifiers);
     }
 
     fn scroll(&mut self, x: f64, y: f64, delta_x: f64, delta_y: f64, unit: ScrollUnit) {
@@ -516,7 +540,7 @@ const fn native_key_code(_code: Code) -> u32 {
 
 /// The macOS editing shortcuts Chromium expects the embedder to perform.
 ///
-/// A windowless browser has no menu bar, so ⌘Z/⌘X/⌘C/⌘V/⌘A reach the page as
+/// A windowless browser has no menu bar, so ⌘Z/⌘X/⌘C/⌘A reach the page as
 /// ordinary keystrokes and nothing happens. `AppKit` applications answer them by
 /// invoking the corresponding editing command, which is what these do.
 #[cfg(target_os = "macos")]
@@ -526,7 +550,6 @@ enum MacEditShortcut {
     Redo,
     Cut,
     Copy,
-    Paste,
     SelectAll,
 }
 
@@ -545,7 +568,6 @@ impl MacEditShortcut {
             ('z', true) => Self::Redo,
             ('x', false) => Self::Cut,
             ('c', false) => Self::Copy,
-            ('v', false) => Self::Paste,
             ('a', false) => Self::SelectAll,
             _ => return None,
         })
@@ -557,7 +579,6 @@ impl MacEditShortcut {
             Self::Redo => page.redo(),
             Self::Cut => page.cut(),
             Self::Copy => page.copy(),
-            Self::Paste => page.paste(),
             Self::SelectAll => page.select_all(),
         }
     }
@@ -819,9 +840,11 @@ mod tests {
             MacEditShortcut::from_input(&Key::Character("x".into()), command),
             Some(MacEditShortcut::Cut)
         );
+        // Paste is not among them: the platform's paste command reaches the
+        // adapter as `SurfaceInputEvent::Paste`, never as a key.
         assert_eq!(
             MacEditShortcut::from_input(&Key::Character("v".into()), command),
-            Some(MacEditShortcut::Paste)
+            None
         );
         assert_eq!(
             MacEditShortcut::from_input(&Key::Character("z".into()), command),
