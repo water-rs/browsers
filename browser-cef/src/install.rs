@@ -12,15 +12,17 @@ use waterui_core::{AnyView, Environment, Metadata, Retain, view::Hook};
 use crate::{CefRuntime, CefRuntimeConfiguration};
 
 /// Returns the process-owned CEF runtime, starting one if the environment has
-/// none, and makes sure its message pump is running.
+/// none.
+///
+/// Spawns nothing: an install runs while the application is still being built,
+/// before a backend has installed the local executor. The message pump starts
+/// with the first page the runtime creates.
 fn ensure_runtime(env: &mut Environment) -> CefRuntime {
-    let runtime = env.get::<CefRuntime>().cloned().unwrap_or_else(|| {
+    env.get::<CefRuntime>().cloned().unwrap_or_else(|| {
         let runtime = CefRuntime::initialize(CefRuntimeConfiguration::packaged());
         env.insert(runtime.clone());
         runtime
-    });
-    runtime.start_message_pump();
-    runtime
+    })
 }
 
 /// Installs the CEF realization of the standard [`WebView`](waterui_webview::WebView).
@@ -39,6 +41,10 @@ fn ensure_runtime(env: &mut Environment) -> CefRuntime {
 /// [`WebViewController`](waterui_webview::WebViewController) unless the
 /// application already installed one of its own, and registers the hook that
 /// draws every `WebView` into a GPU surface.
+///
+/// Installing spawns no task, so it is safe to call before the backend has
+/// installed the local executor. The runtime's message pump starts when the
+/// first page is created.
 ///
 /// # Panics
 ///
@@ -97,6 +103,9 @@ pub fn install(env: &mut Environment) {
 /// The full Chromium component is separate from the standard `WebView` on
 /// purpose, and so is its install: an application that wants both calls both,
 /// and they share one runtime and one message pump.
+///
+/// Like [`install`], it spawns no task: the pump starts when the runtime
+/// creates its first page, whichever component opens it.
 ///
 /// # Panics
 ///
