@@ -569,8 +569,9 @@ struct RuntimeInner {
     pump_requests: Receiver<PumpDeadline>,
     next_pump: Cell<Instant>,
     /// Whether [`CefRuntime::start_message_pump`] already spawned this runtime's
-    /// pump task. The `WebView` and Chromium installs share one runtime and both
-    /// need it running, so the second call must not start a second loop.
+    /// pump task. Every page asks for it, so only the first call may start the
+    /// loop. Only a build that can create pages has a pump.
+    #[cfg(any(feature = "chromium", feature = "webview"))]
     pump_running: Cell<bool>,
     #[cfg(any(feature = "chromium", feature = "webview"))]
     cache_root: PathBuf,
@@ -690,6 +691,7 @@ impl CefRuntime {
                 _library: library,
                 pump_requests,
                 next_pump: Cell::new(Instant::now()),
+                #[cfg(any(feature = "chromium", feature = "webview"))]
                 pump_running: Cell::new(false),
                 #[cfg(any(feature = "chromium", feature = "webview"))]
                 cache_root,
@@ -749,6 +751,7 @@ impl CefRuntime {
     ///
     /// The task holds no strong reference to the runtime and ends when the last
     /// one is dropped.
+    #[cfg(any(feature = "chromium", feature = "webview"))]
     pub(crate) fn start_message_pump(&self) {
         if self.inner.pump_running.replace(true) {
             return;
