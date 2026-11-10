@@ -956,6 +956,10 @@ impl CefPageHandle {
         configuration: CefPageConfiguration,
         mode: CefPageMode,
     ) -> Self {
+        // The first page is where the local executor is known to exist: pages
+        // are opened from a mounted view or running app code, never from an
+        // install. Idempotent for every page after the first.
+        runtime.start_message_pump();
         let state = Rc::new(PageState::new(mode));
         let mut client = new_client(
             new_render_handler(Rc::clone(&state)),

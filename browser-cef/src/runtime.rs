@@ -740,12 +740,16 @@ impl CefRuntime {
     ///
     /// The loop is paced by CEF itself: [`Self::pump`] returns the instant
     /// Chromium asked to be called back at, and the task sleeps exactly that
-    /// long. Calling this more than once for one runtime is a no-op — the
-    /// `WebView` and Chromium installs share a runtime and both ask for it.
+    /// long. Calling this more than once for one runtime is a no-op — every
+    /// page the runtime creates asks for it.
+    ///
+    /// Every page, visible or headless, starts the pump as it is created; an
+    /// install does not, because it runs before a backend has installed the
+    /// local executor this task needs.
     ///
     /// The task holds no strong reference to the runtime and ends when the last
     /// one is dropped.
-    pub fn start_message_pump(&self) {
+    pub(crate) fn start_message_pump(&self) {
         if self.inner.pump_running.replace(true) {
             return;
         }
