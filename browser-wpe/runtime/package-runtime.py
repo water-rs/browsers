@@ -191,10 +191,10 @@ def copy_settings_schemas(root: pathlib.Path) -> list[pathlib.Path]:
 
         GLib-GIO-ERROR **: No GSettings schemas are installed on the system
 
-    So the schemas travel with the modules. `XDG_DATA_DIRS` already names the
-    packaged `share` directory — `water_wpe_configure_runtime_paths` sets it —
-    so a compiled source there is the one the runtime finds, whatever the host
-    it is staged on has or has not installed.
+    So the schemas travel with the modules. `XDG_DATA_DIRS` names the packaged
+    `share` directory first — `water_wpe_configure_runtime_paths` puts it in
+    front of the host's — so a compiled source there is the one the runtime
+    finds, whatever the host it is staged on has or has not installed.
     """
     staged = root / "share/glib-2.0/schemas"
     installed = pathlib.Path("/usr/share/glib-2.0/schemas")
@@ -227,8 +227,8 @@ def verify_settings_schemas(staged: pathlib.Path) -> None:
 
     The question is about the artifact, not about the machine that built it, so
     the host's own schemas are taken out of the search path first: `XDG_DATA_DIRS`
-    is pointed at the packaged `share` directory, which is exactly what
-    `water_wpe_configure_runtime_paths` does when the runtime runs.
+    is pointed at the packaged `share` directory alone, the directory
+    `water_wpe_configure_runtime_paths` puts first when the runtime runs.
     """
     share = staged.parent.parent
     listed = subprocess.run(

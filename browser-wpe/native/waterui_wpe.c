@@ -514,10 +514,20 @@ static void water_wpe_configure_runtime_paths(void)
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path, TRUE);
     g_setenv("GST_PLUGIN_SCANNER_1_0", plugin_scanner, TRUE);
     g_setenv("GIO_EXTRA_MODULES", gio_modules, TRUE);
+    /* The packaged data directory goes in front of the host's, never in place
+     * of them: everything in this process reads this variable, and the Vulkan
+     * loader finds the host's drivers through `vulkan/icd.d` under it. An
+     * unset or empty variable stands for the XDG Base Directory
+     * specification's default list (`g_get_system_data_dirs` would answer it,
+     * but it caches its first answer, which would then hide the packaged
+     * directory from GLib), so that list is what the packaged one is
+     * prepended to. */
     const char *system_data_path = g_getenv("XDG_DATA_DIRS");
-    char *combined_data_path = system_data_path == NULL
-        ? g_strdup(data_path)
-        : g_strconcat(data_path, G_SEARCHPATH_SEPARATOR_S, system_data_path, NULL);
+    if (system_data_path == NULL || system_data_path[0] == '\0') {
+        system_data_path = "/usr/local/share/:/usr/share/";
+    }
+    char *combined_data_path =
+        g_strconcat(data_path, G_SEARCHPATH_SEPARATOR_S, system_data_path, NULL);
     g_setenv("XDG_DATA_DIRS", combined_data_path, TRUE);
     g_free(combined_data_path);
     g_free(gio_modules);
