@@ -12,8 +12,8 @@ use objc2_metal::{
     MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType,
     MTLTextureUsage,
 };
-use waterui_graphics::cherenkov_gpu::interop::metal::import_texture;
 use waterui_graphics::gpu::FrameOutput;
+use waterui_graphics::gpu::interop::metal::import_texture;
 use wgpu_external_frame::io_surface::{PackedFormat, PackedIoSurfaceFrame};
 
 use super::pool::PoolSlot;

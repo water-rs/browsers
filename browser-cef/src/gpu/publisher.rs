@@ -14,8 +14,8 @@ use std::cell::RefCell;
 
 use cef::PaintElementType;
 use num_traits::ToPrimitive as _;
-use waterui_graphics::cherenkov_gpu::interop::{ExternalFrame, FrameColor, RgbAlpha};
 use waterui_graphics::gpu::FrameOutput;
+use waterui_graphics::gpu::interop::{ExternalFrame, FrameColor, RgbAlpha};
 
 use super::pool::{Claim, PoolSlot, SlotPool};
 use crate::CefPopupRect;
