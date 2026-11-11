@@ -21,7 +21,7 @@ mod linux {
     use waterui_browser_wpe::{
         BrowserFrameSource, BrowserGpuView, WPE_WEBKIT_VERSION, WpeRuntime, WpeRuntimePaths,
     };
-    use waterui_graphics::cherenkov::{Display, FrameTime};
+    use waterui_graphics::gpu::{Display, FrameTime};
     use waterui_graphics::gpu::{ExternalFrameRenderer, GpuRuntime};
     use waterui_graphics::{OffscreenImage, OffscreenSize, RedrawHandle};
     use waterui_url::Url;

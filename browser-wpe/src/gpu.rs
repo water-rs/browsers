@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use num_traits::ToPrimitive as _;
-use waterui_graphics::cherenkov_gpu::interop::vulkan::{
+use waterui_graphics::gpu::interop::vulkan::{
     self, DmaBuf, DmaBufPlane, FrameSource, QueueFamily, Wait,
 };
-use waterui_graphics::cherenkov_gpu::interop::{ExternalFrame, FrameColor, RgbAlpha};
+use waterui_graphics::gpu::interop::{ExternalFrame, FrameColor, RgbAlpha};
 use waterui_graphics::gpu::{ExternalFrameSource, ExternalFrameView, FrameOutput, PresentedSize};
 use wgpu_external_frame::dma_buf::DmaBufFrame;
 
