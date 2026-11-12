@@ -125,13 +125,13 @@ mod linux {
         let view = BrowserGpuView::new(source).into_view();
         let context = gpu_runtime.context();
         // One frame, read back at once: no host loop exists to wake.
-        let mut renderer = ExternalFrameRenderer::new(
+        let mut renderer = pollster::block_on(ExternalFrameRenderer::new(
             gpu_runtime,
             context.clone(),
             &view.stream(),
             size,
             RedrawHandle::new(|| {}),
-        )
+        ))
         .expect("the smoke renderer's engine layer installs");
         // The UI hook imports the smoke frame onto the output the renderer
         // started the view's source with; run it before presenting so the
