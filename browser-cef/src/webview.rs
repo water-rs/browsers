@@ -10,7 +10,7 @@ use waterui_core::{Computed, Signal};
 use waterui_url::Url;
 use waterui_webview::{
     ASSET_ORIGIN, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime, WatcherGuard,
-    WebViewConfig, WebViewHandle, bridge,
+    WebViewConfig, WebViewHandle, WebViewOpenError, bridge,
 };
 
 use crate::cdp::{CefCdpError, CefCdpSession, protocol};
@@ -376,7 +376,7 @@ impl CefWebViewHandle {
 }
 
 impl CustomWebViewController for CefController {
-    fn open(&self, config: WebViewConfig) -> impl WebViewHandle {
+    fn open(&self, config: WebViewConfig) -> Result<impl WebViewHandle, WebViewOpenError> {
         let page = self.open_page(
             CefPageConfiguration {
                 renderer: Some(RendererBundle::new(&config)),
@@ -390,7 +390,7 @@ impl CustomWebViewController for CefController {
         if let Some(server) = config.asset_server() {
             crate::assets::register_scheme_handler(&handle.page.request_context(), server.clone());
         }
-        handle
+        Ok(handle)
     }
 
     fn asset_origin(&self) -> Option<Url> {

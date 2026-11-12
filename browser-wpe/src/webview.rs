@@ -8,7 +8,7 @@ use waterui_core::{Computed, Signal};
 use waterui_url::Url;
 use waterui_webview::{
     ASSET_ORIGIN, CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebViewConfig,
-    WebViewHandle,
+    WebViewHandle, WebViewOpenError,
 };
 
 use crate::{WpePage, WpeRuntime, WpeRuntimePaths};
@@ -102,8 +102,8 @@ impl WpeController {
 }
 
 impl CustomWebViewController for WpeController {
-    fn open(&self, config: WebViewConfig) -> impl WebViewHandle {
-        WpeWebViewHandle::new(WpePage::new(self.runtime()), &config)
+    fn open(&self, config: WebViewConfig) -> Result<impl WebViewHandle, WebViewOpenError> {
+        Ok(WpeWebViewHandle::new(WpePage::new(self.runtime()), &config))
     }
 
     fn asset_origin(&self) -> Option<Url> {
