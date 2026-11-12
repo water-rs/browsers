@@ -125,13 +125,13 @@ mod linux {
         let view = BrowserGpuView::new(source).into_view();
         let context = gpu_runtime.context();
         // One frame, read back at once: no host loop exists to wake.
-        let mut renderer = ExternalFrameRenderer::new(
+        let mut renderer = pollster::block_on(ExternalFrameRenderer::new(
             gpu_runtime,
             context.clone(),
             &view.stream(),
             size,
             RedrawHandle::new(|| {}),
-        )
+        ))
         .expect("the smoke renderer's engine layer installs");
         // The UI hook imports the smoke frame onto the output the renderer
         // started the view's source with; run it before presenting so the
@@ -152,16 +152,15 @@ mod linux {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        renderer
-            .present(
-                &target,
-                Display {
-                    scale: 1.0,
-                    headroom: 1.0,
-                },
-                FrameTime::now(),
-            )
-            .expect("the smoke frame presents");
+        pollster::block_on(renderer.present(
+            &target,
+            Display {
+                scale: 1.0,
+                headroom: 1.0,
+            },
+            FrameTime::now(),
+        ))
+        .expect("the smoke frame presents");
         let bytes_per_row = WIDTH * 4;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wpe_smoke_readback"),
