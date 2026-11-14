@@ -59,7 +59,7 @@ tracing = "0.1.44"
 waterui-chromium = { version = "0.5.1", optional = true }
 waterui-core = { version = "0.5.1" }
 waterui-graphics = { version = "0.5.1", features = ["gpu"] }
-suiteki = { git = "https://github.com/water-rs/suiteki.git", branch = "dev", optional = true }
+suiteki = { git = "https://github.com/water-rs/suiteki.git", branch = "main", optional = true }
 waterui-watcher-set = { version = "0.5.1", optional = true }
 waterui-url = { version = "0.5.1" }
 waterui-webview = { version = "0.5.1", optional = true }
@@ -92,15 +92,15 @@ objc2-security = { version = "0.3", features = [
     "SecStaticCode",
 ] }
 wgpu = "30.0.1"
-wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "dev" }
+wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "main" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = "30.0.1"
-wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "dev" }
+wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "main" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = "30.0.1"
-wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "dev" }
+wgpu-external-frame = { version = "0.4.0", git = "https://github.com/water-rs/wgpu-external-frame.git", branch = "main" }
 
 [dev-dependencies]
 askama = "0.16"

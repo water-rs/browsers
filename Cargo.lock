@@ -3199,7 +3199,7 @@ checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 [[package]]
 name = "shaderloom"
 version = "0.2.1"
-source = "git+https://github.com/water-rs/shaderloom?branch=dev#9e0402afaf8263dc149a3fcb85601532fd5bb907"
+source = "git+https://github.com/water-rs/shaderloom?branch=main#9e0402afaf8263dc149a3fcb85601532fd5bb907"
 dependencies = [
  "serde",
  "toml",
@@ -3344,7 +3344,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "suiteki"
 version = "0.1.1"
-source = "git+https://github.com/water-rs/suiteki?branch=dev#3ba2ad03ccc9379b9fe836dca89875a89d8e0684"
+source = "git+https://github.com/water-rs/suiteki?branch=main#3ba2ad03ccc9379b9fe836dca89875a89d8e0684"
 dependencies = [
  "nami-core",
  "serde",
@@ -4000,7 +4000,7 @@ dependencies = [
  "waterui-watcher-set",
  "waterui-webview",
  "wgpu",
- "wgpu-external-frame 0.4.0 (git+https://github.com/water-rs/wgpu-external-frame.git?branch=dev)",
+ "wgpu-external-frame 0.4.0 (git+https://github.com/water-rs/wgpu-external-frame.git?branch=main)",
 ]
 
 [[package]]
@@ -4031,7 +4031,7 @@ dependencies = [
  "waterui-watcher-set",
  "waterui-webview",
  "wgpu",
- "wgpu-external-frame 0.4.0 (git+https://github.com/water-rs/wgpu-external-frame.git?branch=dev)",
+ "wgpu-external-frame 0.4.0 (git+https://github.com/water-rs/wgpu-external-frame.git?branch=main)",
  "xkeysym",
 ]
 
@@ -4392,7 +4392,7 @@ dependencies = [
 [[package]]
 name = "wgpu-external-frame"
 version = "0.4.0"
-source = "git+https://github.com/water-rs/wgpu-external-frame.git?branch=dev#d1bac57d42d9d6e8b7003e2d9760ac383161c972"
+source = "git+https://github.com/water-rs/wgpu-external-frame.git?branch=main#d1bac57d42d9d6e8b7003e2d9760ac383161c972"
 dependencies = [
  "ash",
  "glow 0.18.0",
