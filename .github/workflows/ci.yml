@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: ["**"]
 
@@ -20,8 +20,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bump:
+    # release-plz bump pull requests (`release-plz-*` heads) change only
+    # versions and the changelog, so this job skips itself and every other
+    # job skips through `needs: bump`.
+    name: Not a release bump
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} is not a release bump"
+
   test:
     name: Test / ${{ matrix.os }}
+    needs: bump
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -41,13 +52,13 @@ jobs:
       - name: Install DirectX Shader Compiler
         if: runner.os == 'Windows'
         uses: tracel-ai/github-actions/install-dxc@295f2fdbae5271f4f8ad56d634e4ff6a95daafc8
-      # Saved from `dev` only: a pull request restores the default branch's
+      # Saved from `main` only: a pull request restores the default branch's
       # entry anyway, and each branch saving two to three gigabytes of its own
       # is what fills the repository's cache quota and evicts the WPE entries
       # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `--all-features` is not a valid selection for this workspace:
       # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
       # in its build script, because one links a CEF binary distribution and the
@@ -115,6 +126,7 @@ jobs:
 
   lint:
     name: Lint
+    needs: bump
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,13 +137,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
-      # Saved from `dev` only: a pull request restores the default branch's
+      # Saved from `main` only: a pull request restores the default branch's
       # entry anyway, and each branch saving two to three gigabytes of its own
       # is what fills the repository's cache quota and evicts the WPE entries
       # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       # The identity `waterui-browser-wpe` declares is how a consumer finds the
       # packaged WPE runtime `wpe-real-engine.yml` publishes for it, so a change
@@ -154,6 +166,7 @@ jobs:
 
   msrv:
     name: MSRV
+    needs: bump
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -184,13 +197,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
-      # Saved from `dev` only: a pull request restores the default branch's
+      # Saved from `main` only: a pull request restores the default branch's
       # entry anyway, and each branch saving two to three gigabytes of its own
       # is what fills the repository's cache quota and evicts the WPE entries
       # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Proof in the log that the floor is what compiled, so a later change to
       # the pin or the action cannot quietly make this a second stable run.
       - name: Show the toolchain this job builds with
@@ -208,3 +221,22 @@ jobs:
         run: cargo check -p waterui-browser-wpe --features real-engine,runtime-smoke
       - name: Check the CEF backend without its binary distribution
         run: cargo check -p waterui-browser-cef --no-default-features --features compile-only,chromium,webview
+
+  result:
+    # The single check the `main` ruleset requires: it passes when every
+    # job passed or was skipped (release-plz bump pull requests skip all).
+    name: CI result
+    if: always()
+    needs: [bump, test, lint, msrv]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ', ') }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "job results: $RESULTS"
+          if [ "$FAILED" = "true" ]; then
+            echo "::error::one or more jobs failed or were cancelled"
+            exit 1
+          fi

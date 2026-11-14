@@ -27,9 +27,9 @@ name: WPE Real Engine
 # Publishing waits for both architectures to pass the smoke run and the
 # real-engine suite, so every published runtime is one these tests accepted.
 # It happens from any ref: the identity covers this workflow too, so a topic
-# branch that publishes has built exactly what `dev` will build once it merges,
-# and the push run after the merge finds it and only tests it. A push to `dev`
-# that changes an input publishes on its own, so every identity `dev` declares
+# branch that publishes has built exactly what `main` will build once it merges,
+# and the push run after the merge finds it and only tests it. A push to `main`
+# that changes an input publishes on its own, so every identity `main` declares
 # has its runtime; the push filter below is `runtime/identity.py`'s input list.
 #
 # Building is a multi-hour compile of WPE WebKit from the pinned source tarball,
@@ -47,7 +47,7 @@ permissions:
 on:
   workflow_dispatch:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - browser-wpe/runtime/**
       - browser-wpe/native/**
@@ -56,12 +56,12 @@ on:
       - .github/actions/llvm-apt-source/**
       - .github/workflows/wpe-real-engine.yml
 
-# A `dev` push publishes the identity of its own commit, which a later push must
+# A `main` push publishes the identity of its own commit, which a later push must
 # not cancel: the lockfile of a consumer may name exactly that commit. Elsewhere
 # the newest dispatch on a ref supersedes the older one.
 concurrency:
-  group: wpe-real-engine-${{ github.ref == 'refs/heads/dev' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
+  group: wpe-real-engine-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
   run:
