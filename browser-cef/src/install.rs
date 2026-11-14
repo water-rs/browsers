@@ -3,24 +3,26 @@
 //! Which browser engine draws a `WebView` is the application's choice, not the
 //! renderer's: an app that wants Chromium depends on this crate and calls
 //! [`install`] from its composition root. The renderer stays engine-agnostic —
-//! it draws the [`GpuSurface`] this hook returns exactly like any other — and a
-//! build that never asks for CEF links none of it.
+//! it draws the `GpuView` this hook returns exactly like any other —
+//! and a build that never asks for CEF links none of it.
 
+use waterui_core::accessibility::{AccessibilityRole, default_role};
 use waterui_core::{AnyView, Environment, Metadata, Retain, view::Hook};
-use waterui_graphics::gpu_surface::GpuSurface;
 
 use crate::{CefRuntime, CefRuntimeConfiguration};
 
 /// Returns the process-owned CEF runtime, starting one if the environment has
-/// none, and makes sure its message pump is running.
+/// none.
+///
+/// Spawns nothing: an install runs while the application is still being built,
+/// before a backend has installed the local executor. The message pump starts
+/// with the first page the runtime creates.
 fn ensure_runtime(env: &mut Environment) -> CefRuntime {
-    let runtime = env.get::<CefRuntime>().cloned().unwrap_or_else(|| {
+    env.get::<CefRuntime>().cloned().unwrap_or_else(|| {
         let runtime = CefRuntime::initialize(CefRuntimeConfiguration::packaged());
         env.insert(runtime.clone());
         runtime
-    });
-    runtime.start_message_pump();
-    runtime
+    })
 }
 
 /// Installs the CEF realization of the standard [`WebView`](waterui_webview::WebView).
@@ -40,6 +42,10 @@ fn ensure_runtime(env: &mut Environment) -> CefRuntime {
 /// application already installed one of its own, and registers the hook that
 /// draws every `WebView` into a GPU surface.
 ///
+/// Installing spawns no task, so it is safe to call before the backend has
+/// installed the local executor. The runtime's message pump starts when the
+/// first page is created.
+///
 /// # Panics
 ///
 /// Panics when a `WebView` realization is already installed. Two engines cannot
@@ -50,7 +56,7 @@ fn ensure_runtime(env: &mut Environment) -> CefRuntime {
 /// by type before the hook is ever consulted.
 #[cfg(feature = "webview")]
 pub fn install(env: &mut Environment) {
-    use waterui_webview::{WebView, WebViewController, web_surface_semantics};
+    use waterui_webview::{WebView, WebViewController};
 
     use crate::CefWebViewHandle;
 
@@ -74,16 +80,18 @@ pub fn install(env: &mut Environment) {
             )
             .page()
             .clone();
-        // The CEF view takes its own input: it reports `wants_input_events`, so
-        // a renderer routes what lands on this layer straight into this crate's
-        // adapter and owns no Chromium semantics.
-        let surface = GpuSurface::new(crate::gpu_view_with_input(page));
+        // The CEF view takes its own input: it reports `wants_input_events`,
+        // so a renderer routes what lands on this layer straight into this
+        // crate's adapter and owns no Chromium semantics.
+        let surface = crate::gpu_view_with_input(page);
         // The semantic `WebView` owns the subscriptions that drive
         // `can_go_back` / `can_go_forward`, the event signal, and the URL and
         // user-agent bindings. Dropping it here would leave a live page whose
         // reactive state had gone dead.
+        // The page is drawn into a texture the host tree cannot see into, so
+        // the view publishes the accessibility node itself.
         AnyView::new(Metadata::new(
-            web_surface_semantics(env, surface),
+            default_role(env, surface, AccessibilityRole::Group),
             Retain::new(webview),
         ))
     });
@@ -96,24 +104,26 @@ pub fn install(env: &mut Environment) {
 /// purpose, and so is its install: an application that wants both calls both,
 /// and they share one runtime and one message pump.
 ///
+/// Like [`install`], it spawns no task: the pump starts when the runtime
+/// creates its first page, whichever component opens it.
+///
 /// # Panics
 ///
 /// Panics when a `ChromiumView` realization is already installed, for the same
 /// reason [`install`] does.
 #[cfg(feature = "chromium")]
 pub fn install_chromium(env: &mut Environment) {
-    use waterui_chromium::{ChromiumController, ChromiumView, PageMode};
-    use waterui_webview::web_surface_semantics;
-
     use crate::CefPageHandle;
+    use waterui_chromium::{ChromiumController, ChromiumView, PageMode};
+    use waterui_core::State;
 
     assert!(
         env.get::<Hook<ChromiumView>>().is_none(),
         "a ChromiumView realization is already installed; an application selects exactly one Chromium runtime"
     );
     let runtime = ensure_runtime(env);
-    if env.get::<ChromiumController>().is_none() {
-        env.insert(runtime.chromium_controller());
+    if env.get::<State<ChromiumController>>().is_none() {
+        env.insert(State(runtime.chromium_controller()));
     }
     env.insert_hook::<ChromiumView, AnyView>(|env, chromium| {
         assert_eq!(
@@ -130,9 +140,11 @@ pub fn install_chromium(env: &mut Environment) {
                  the ChromiumController in this environment is not CEF's",
             )
             .clone();
-        let surface = GpuSurface::new(crate::gpu_view_with_input(page));
+        let surface = crate::gpu_view_with_input(page);
+        // The page is drawn into a texture the host tree cannot see into, so
+        // the view publishes the accessibility node itself.
         AnyView::new(Metadata::new(
-            web_surface_semantics(env, surface),
+            default_role(env, surface, AccessibilityRole::Group),
             Retain::new(chromium),
         ))
     });

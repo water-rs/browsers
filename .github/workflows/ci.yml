@@ -14,6 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -27,17 +30,88 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1 xvfb
       # `shaderloom` compiles WGSL to DXIL on Windows through `dxc`
       - name: Install DirectX Shader Compiler
         if: runner.os == 'Windows'
         uses: tracel-ai/github-actions/install-dxc@295f2fdbae5271f4f8ad56d634e4ff6a95daafc8
+      # Saved from `dev` only: a pull request restores the default branch's
+      # entry anyway, and each branch saving two to three gigabytes of its own
+      # is what fills the repository's cache quota and evicts the WPE entries
+      # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets --all-features
+        with:
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - uses: taiki-e/install-action@nextest
+      - name: Test the default features
+        run: cargo nextest run --workspace --all-targets --no-tests warn
+      # Chromium sandboxes its child processes with a user namespace when it can
+      # and falls back to the setuid helper when it cannot. Ubuntu 24.04 refuses
+      # unprivileged user namespaces by default, which forces the fallback onto
+      # a helper no CI job can make setuid root, and Chromium aborts rather than
+      # run unsandboxed. Lifting the restriction keeps the sandbox on, which is
+      # what `no_sandbox: 0` asks of every platform.
+      - name: Allow Chromium's namespace sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Chromium needs a display server to start, and a hosted Linux runner has
+      # none. `xvfb-run` supplies one for the process it launches, which is the
+      # whole cargo invocation so the staged runtime's child processes inherit
+      # it.
+      #
+      # A hosted runner has no GPU either, and the real-engine checks need one:
+      # a CEF browser here is windowless and exports its frames as a shared
+      # texture, which on Linux is a DMA-BUF out of Chromium's GPU process, and
+      # llvmpipe has no GPU allocation to export. The checks probe for an
+      # adapter before initializing CEF and skip with a reason on this runner
+      # (water-rs/browsers#12), so what this step proves on Linux is that the
+      # crate builds, its unit tests pass, and the runtime stages and re-runs
+      # the checks from itself. Do not drop the step for that: the day the leg
+      # moves to a machine with a GPU, the same command runs every check.
+      - name: Test the CEF runtime surfaces
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      # macOS has a GPU and runs every check. Windows is the Linux case again:
+      # the shared texture is a Direct3D shared handle there, a hosted Windows
+      # runner offers only the WARP software adapter, and Chromium refuses the
+      # browser (water-rs/browsers#23). The same probe answers for both — a `Cpu`
+      # adapter, or one on a backend the import cannot be built on — so this step
+      # runs the checks on macOS and proves the build, the unit tests and the
+      # staged re-run on Windows.
+      - name: Test the CEF runtime surfaces
+        if: runner.os != 'Linux'
+        run: cargo test -p waterui-browser-cef --all-targets --features chromium,real-engine
+      # `real-engine` is deliberately missing from this one step's feature list.
+      # `browser-wpe/tests/real_engine.rs` drives a genuine WPE WebKit runtime
+      # and fails loudly when none is staged. Those checks run in
+      # `wpe-real-engine.yml`, which builds and publishes the packaged runtime
+      # for both architectures and stages it exactly as `water package` would,
+      # and in `wpe-bridge.yml`, which compiles this change's bridge into the
+      # published runtime on every pull request that touches the crate.
+      # Nothing stops being compiled here: the `Lint` job below builds the
+      # real-engine target with `-D warnings`, and the `MSRV` job checks it.
+      - name: Test the WPE surfaces
+        run: cargo nextest run -p waterui-browser-wpe --all-targets --features runtime-smoke --no-tests warn
+      # The Lint job runs on Linux, which compiles the `cfg(target_os =
+      # "macos")` and `cfg(windows)` code of the CEF crate away; these passes
+      # are its only lint coverage. On Linux the Lint job runs both.
+      - name: Clippy the CEF runtime surfaces
+        if: runner.os != 'Linux'
+        run: cargo clippy -p waterui-browser-cef --all-targets --features chromium,real-engine -- -D warnings
+      - name: Clippy the CEF backend without its binary distribution
+        if: runner.os != 'Linux'
+        run: cargo clippy -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview -- -D warnings
 
   lint:
     name: Lint
@@ -51,19 +125,86 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
+      # Saved from `dev` only: a pull request restores the default branch's
+      # entry anyway, and each branch saving two to three gigabytes of its own
+      # is what fills the repository's cache quota and evicts the WPE entries
+      # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The identity `waterui-browser-wpe` declares is how a consumer finds the
+      # packaged WPE runtime `wpe-real-engine.yml` publishes for it, so a change
+      # to anything that decides that runtime's contents has to update it.
+      - name: Check the declared WPE runtime identity
+        run: browser-wpe/runtime/identity.py --check
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - name: Clippy the default features
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy the CEF runtime surfaces
+        run: cargo clippy -p waterui-browser-cef --all-targets --features chromium,real-engine -- -D warnings
+      - name: Clippy the WPE surfaces
+        run: cargo clippy -p waterui-browser-wpe --all-targets --features real-engine,runtime-smoke -- -D warnings
+      - name: Clippy the CEF backend without its binary distribution
+        run: cargo clippy -p waterui-browser-cef --all-targets --no-default-features --features compile-only,chromium,webview -- -D warnings
 
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      # The floor is whatever `Cargo.toml` declares, read here rather than
+      # written twice: a hardcoded version in CI drifts from the manifest and
+      # then gates a number nobody declared.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::Cargo.toml declares no rust-version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Installing a toolchain is not building with it: the action only
+          # sets the rustup default, and this repository's
+          # `rust-toolchain.toml` overrides the default for every cargo
+          # invocation inside the checkout. Without this env var the job
+          # compiled on `stable` and proved nothing about the floor.
+          echo "RUSTUP_TOOLCHAIN=$version" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm libasound2-dev libva-dev libfontconfig1-dev             libgbm-dev libxcb1-dev libglib2.0-dev libpango1.0-dev libgdk-pixbuf-2.0-dev             libgtk-4-dev libpipewire-0.3-dev libudev-dev libegl-dev libwayland-dev             libxkbcommon-dev mesa-vulkan-drivers libvulkan1
+      # Saved from `dev` only: a pull request restores the default branch's
+      # entry anyway, and each branch saving two to three gigabytes of its own
+      # is what fills the repository's cache quota and evicts the WPE entries
+      # (`wpe-real-engine.yml`).
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
+        with:
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+      # Proof in the log that the floor is what compiled, so a later change to
+      # the pin or the action cannot quietly make this a second stable run.
+      - name: Show the toolchain this job builds with
+        run: rustc --version && cargo --version
+      # `--all-features` is not a valid selection for this workspace:
+      # `waterui-browser-cef` rejects `cef-runtime` and `compile-only` together
+      # in its build script, because one links a CEF binary distribution and the
+      # other stands in for it with documentation stubs. Every feature of both
+      # crates is therefore named by the pass that covers it.
+      - name: Check the default features
+        run: cargo check --workspace
+      - name: Check the CEF runtime surfaces
+        run: cargo check -p waterui-browser-cef --features chromium,real-engine
+      - name: Check the WPE surfaces
+        run: cargo check -p waterui-browser-wpe --features real-engine,runtime-smoke
+      - name: Check the CEF backend without its binary distribution
+        run: cargo check -p waterui-browser-cef --no-default-features --features compile-only,chromium,webview

@@ -1,17 +1,17 @@
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::rc::Rc;
 
 use cef::{AcceleratedPaintInfo, ColorType, PaintElementType, Rect};
-use waterui_graphics::gpu_surface::{GpuContext, GpuFrame, GpuView};
+use waterui_graphics::gpu::FrameOutput;
 use wgpu_external_frame::dma_buf::{DmaBufFormat, DmaBufFrame, DmaBufImporter, DmaBufPlane};
 
-use super::presenter::{OwnedFrameMailbox, TexturePresenter};
-use super::{request_browser_frame, sync_browser_viewport};
-use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
+use super::publisher::{FramePublisher, PlainAllocator};
+use crate::{AcceleratedFrameSink, CefPopupRect};
 
-struct LinuxFrameSink {
-    importer: Rc<DmaBufImporter>,
-    mailbox: Rc<OwnedFrameMailbox>,
+pub(super) struct LinuxFrameSink {
+    importer: DmaBufImporter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    publisher: FramePublisher<PlainAllocator>,
 }
 
 impl AcceleratedFrameSink for LinuxFrameSink {
@@ -48,7 +48,7 @@ impl AcceleratedFrameSink for LinuxFrameSink {
         } else {
             panic!("CEF returned unsupported Linux accelerated color format")
         };
-        let borrowed_frame = DmaBufFrame::new(
+        let mut borrowed_frame = DmaBufFrame::new(
             width,
             height,
             format,
@@ -64,85 +64,60 @@ impl AcceleratedFrameSink for LinuxFrameSink {
         // image at a coded size with alignment padding, and presenting that edge
         // to edge stretches the page and draws the gutter.
         let visible = &frame.extra.visible_rect;
-        let borrowed_frame = match (u32::try_from(visible.width), u32::try_from(visible.height)) {
-            (Ok(visible_width), Ok(visible_height))
-                if visible_width <= width && visible_height <= height =>
-            {
-                borrowed_frame.with_visible_size(visible_width, visible_height)
-            }
-            _ => borrowed_frame,
-        };
-        self.mailbox
-            .publish(element, self.importer.copy_to_texture(borrowed_frame));
+        if let (Ok(visible_width), Ok(visible_height)) =
+            (u32::try_from(visible.width), u32::try_from(visible.height))
+            && visible_width <= width
+            && visible_height <= height
+        {
+            borrowed_frame = borrowed_frame.with_visible_size(visible_width, visible_height);
+        }
+        self.publisher.paint(
+            element,
+            borrowed_frame.visible_size(),
+            format.texture_format(),
+            |destination| {
+                let import = self.importer.copy_into(&mut borrowed_frame, destination);
+                // The copy and the barriers around it go ahead of the encoder in
+                // one submission. CEF takes the DMA-BUF back when this callback
+                // returns and Vulkan does not order Chromium's next write behind
+                // our read, so the copy completes before the callback does.
+                let submission = self.queue.submit(
+                    import
+                        .command_buffers
+                        .into_iter()
+                        .chain([import.encoder.finish()]),
+                );
+                self.device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: None,
+                    })
+                    .expect("the CEF DMA-BUF copy failed");
+                borrowed_frame.presented();
+                drop(import.guard);
+            },
+        );
     }
 
     fn set_popup_rect(&self, rect: Option<CefPopupRect>) {
-        self.mailbox.set_popup_rect(rect);
+        self.publisher.set_popup_rect(rect);
     }
 }
 
-pub(super) struct CefGpuView {
-    page: CefPageHandle,
-    mailbox: Rc<OwnedFrameMailbox>,
-    presenter: Option<TexturePresenter>,
-}
-
-impl CefGpuView {
-    pub(super) fn new(page: CefPageHandle) -> Self {
-        Self {
-            page,
-            mailbox: Rc::new(OwnedFrameMailbox::new()),
-            presenter: None,
-        }
+pub(super) fn make_frame_sink(output: FrameOutput) -> LinuxFrameSink {
+    let shared = output.shared_device();
+    assert_eq!(
+        shared.adapter.get_info().backend,
+        wgpu::Backend::Vulkan,
+        "CEF DMA-BUF composition requires WaterUI's Vulkan backend"
+    );
+    let importer = DmaBufImporter::new(&shared.device, &shared.queue, &shared.adapter);
+    let device = shared.device.clone();
+    let queue = shared.queue.clone();
+    LinuxFrameSink {
+        importer,
+        device: device.clone(),
+        queue,
+        publisher: FramePublisher::new(output, PlainAllocator { device }),
     }
-}
-
-impl GpuView for CefGpuView {
-    #[expect(
-        clippy::future_not_send,
-        reason = "CEF, DMA-BUF interop, and WaterUI view state are confined to the UI thread"
-    )]
-    async fn setup(&mut self, context: &GpuContext<'_>, _env: &mut waterui_core::Environment) {
-        assert!(
-            matches!(
-                context.adapter.get_info().backend,
-                wgpu::Backend::Vulkan | wgpu::Backend::Gl
-            ),
-            "CEF DMA-BUF composition requires WaterUI's Vulkan or EGL/GLES backend"
-        );
-        let redraw = context.redraw_handle.clone();
-        self.mailbox
-            .set_waker(Rc::new(move || redraw.request_redraw()));
-        self.page.set_frame_sink(LinuxFrameSink {
-            importer: Rc::new(DmaBufImporter::new(
-                context.device,
-                context.queue,
-                context.adapter,
-            )),
-            mailbox: Rc::clone(&self.mailbox),
-        });
-        self.presenter = Some(TexturePresenter::new(context));
-    }
-
-    fn render(&mut self, frame: &mut GpuFrame<'_>) {
-        self.page.pump();
-        request_browser_frame(&self.page, frame);
-        let scale = sync_browser_viewport(&self.page, frame);
-        let presenter = self
-            .presenter
-            .as_mut()
-            .expect("CEF GPU view rendered before setup");
-        if let Some(texture) = self.mailbox.take_view() {
-            presenter.set_source(texture);
-        }
-        if let Some(texture) = self.mailbox.take_popup() {
-            presenter.set_popup_source(texture);
-        }
-        presenter.set_popup_rect(self.mailbox.popup_rect());
-        presenter.render(frame, scale);
-    }
-}
-
-pub(super) fn gpu_view(page: CefPageHandle) -> CefGpuView {
-    CefGpuView::new(page)
 }

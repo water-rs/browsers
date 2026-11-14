@@ -1,18 +1,16 @@
 use std::ptr::NonNull;
-use std::rc::Rc;
 
 use cef::{AcceleratedPaintInfo, ColorType, PaintElementType, Rect};
-use waterui_graphics::gpu_surface::{GpuContext, GpuFrame, GpuView};
+use waterui_graphics::gpu::FrameOutput;
 use wgpu_external_frame::shared_handle::SharedHandleFrame;
 
-use super::presenter::{OwnedFrameMailbox, TexturePresenter, copy_source_texture};
-use super::{request_browser_frame, sync_browser_viewport};
-use crate::{AcceleratedFrameSink, CefPageHandle, CefPopupRect};
+use super::publisher::{FramePublisher, PlainAllocator, submit_copy};
+use crate::{AcceleratedFrameSink, CefPopupRect};
 
-struct WindowsFrameSink {
+pub(super) struct WindowsFrameSink {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    mailbox: Rc<OwnedFrameMailbox>,
+    publisher: FramePublisher<PlainAllocator>,
 }
 
 impl AcceleratedFrameSink for WindowsFrameSink {
@@ -44,78 +42,37 @@ impl AcceleratedFrameSink for WindowsFrameSink {
         // presenting the padded texture edge to edge stretches the page and
         // draws the gutter.
         let visible = &frame.extra.visible_rect;
-        let owned = copy_source_texture(
-            &self.device,
-            &self.queue,
-            &source,
-            wgpu::Extent3d {
-                width: u32::try_from(visible.width).unwrap_or(width).min(width),
-                height: u32::try_from(visible.height).unwrap_or(height).min(height),
-                depth_or_array_layers: 1,
-            },
-            format,
+        let extent = (
+            u32::try_from(visible.width).unwrap_or(width).min(width),
+            u32::try_from(visible.height).unwrap_or(height).min(height),
         );
-        self.mailbox.publish(element, owned);
+        self.publisher
+            .paint(element, extent, format, |destination| {
+                submit_copy(&self.device, &self.queue, &source, destination, extent);
+            });
     }
 
     fn set_popup_rect(&self, rect: Option<CefPopupRect>) {
-        self.mailbox.set_popup_rect(rect);
+        self.publisher.set_popup_rect(rect);
     }
 }
 
-pub(super) struct CefGpuView {
-    page: CefPageHandle,
-    mailbox: Rc<OwnedFrameMailbox>,
-    presenter: Option<TexturePresenter>,
-}
-
-impl CefGpuView {
-    pub(super) fn new(page: CefPageHandle) -> Self {
-        Self {
-            page,
-            mailbox: Rc::new(OwnedFrameMailbox::new()),
-            presenter: None,
-        }
-    }
-}
-
-impl GpuView for CefGpuView {
-    #[expect(
-        clippy::future_not_send,
-        reason = "CEF, Direct3D 12, and WaterUI view state are confined to the UI thread"
-    )]
-    async fn setup(&mut self, context: &GpuContext<'_>, _env: &mut waterui_core::Environment) {
-        assert_eq!(
-            context.adapter.get_info().backend,
-            wgpu::Backend::Dx12,
-            "CEF shared D3D texture composition requires WaterUI's Direct3D 12 backend"
-        );
-        let redraw = context.redraw_handle.clone();
-        self.mailbox
-            .set_waker(Rc::new(move || redraw.request_redraw()));
-        self.page.set_frame_sink(WindowsFrameSink {
-            device: context.device.clone(),
-            queue: context.queue.clone(),
-            mailbox: Rc::clone(&self.mailbox),
-        });
-        self.presenter = Some(TexturePresenter::new(context));
-    }
-
-    fn render(&mut self, frame: &mut GpuFrame<'_>) {
-        self.page.pump();
-        request_browser_frame(&self.page, frame);
-        let scale = sync_browser_viewport(&self.page, frame);
-        let presenter = self
-            .presenter
-            .as_mut()
-            .expect("CEF GPU view rendered before setup");
-        if let Some(texture) = self.mailbox.take_view() {
-            presenter.set_source(texture);
-        }
-        if let Some(texture) = self.mailbox.take_popup() {
-            presenter.set_popup_source(texture);
-        }
-        presenter.set_popup_rect(self.mailbox.popup_rect());
-        presenter.render(frame, scale);
+pub(super) fn make_frame_sink(output: FrameOutput) -> WindowsFrameSink {
+    assert_eq!(
+        output.shared_device().adapter.get_info().backend,
+        wgpu::Backend::Dx12,
+        "CEF shared D3D texture composition requires WaterUI's Direct3D 12 backend"
+    );
+    let device = output.device().clone();
+    let queue = output.queue().clone();
+    WindowsFrameSink {
+        publisher: FramePublisher::new(
+            output,
+            PlainAllocator {
+                device: device.clone(),
+            },
+        ),
+        device,
+        queue,
     }
 }
