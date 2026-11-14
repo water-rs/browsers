@@ -44,14 +44,14 @@ wgpu-types = { git = "https://github.com/water-rs/wgpu", branch = "fix/metal-sha
 shaderloom = { git = "https://github.com/water-rs/shaderloom", branch = "main" }
 # The browser crates ask for the published `waterui-*` semver lines like every
 # extracted WaterUI package does; this repo's graph resolves them against the
-# `dev` branch of water-rs/waterui and WaterUI's own workspace patches them
+# `main` branch of water-rs/waterui and WaterUI's own workspace patches them
 # onto its `path` members, so a consumer gets one copy either way.
-waterui-chromium = { git = "https://github.com/water-rs/waterui", branch = "dev" }
-waterui-core = { git = "https://github.com/water-rs/waterui", branch = "dev" }
-waterui-graphics = { git = "https://github.com/water-rs/waterui", branch = "dev" }
-waterui-url = { git = "https://github.com/water-rs/waterui", branch = "dev" }
-waterui-watcher-set = { git = "https://github.com/water-rs/waterui", branch = "dev" }
-waterui-webview = { git = "https://github.com/water-rs/waterui", branch = "dev" }
+waterui-chromium = { git = "https://github.com/water-rs/waterui", branch = "main" }
+waterui-core = { git = "https://github.com/water-rs/waterui", branch = "main" }
+waterui-graphics = { git = "https://github.com/water-rs/waterui", branch = "main" }
+waterui-url = { git = "https://github.com/water-rs/waterui", branch = "main" }
+waterui-watcher-set = { git = "https://github.com/water-rs/waterui", branch = "main" }
+waterui-webview = { git = "https://github.com/water-rs/waterui", branch = "main" }
 # waterui's manifest asks for the published `suiteki` semver line; this repo
 # and waterui's workspace both patch it onto the git source so every `Str`
 # in the graph is the same crate.
