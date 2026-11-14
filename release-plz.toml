@@ -9,6 +9,9 @@ changelog_update = true
 
 [[package]]
 name = "waterui-browser-cef"
+# cargo-semver-checks enables `compile-only` alongside the default
+# `cef-runtime` feature, which `build.rs` rejects as mutually exclusive.
+semver_check = false
 git_release_name = "cef-v{{ version }}"
 git_tag_name = "cef-v{{ version }}"
 
