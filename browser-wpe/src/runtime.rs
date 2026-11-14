@@ -3,20 +3,37 @@
 //! Loading the bridge means `dlopen` plus symbol lookup, so the `unsafe` here is
 //! unavoidable: the library must actually export the symbols at the signatures
 //! declared in `abi`, which is the contract between this crate and the bridge it
-//! is built against. `libloading` keeps the module mapped for as long as the
-//! `Library` lives, and the `Arc` holding it outlives every resolved pointer.
+//! is built against. The module stays mapped for the life of the process — see
+//! [`RuntimeApi`] — so every resolved pointer stays valid for as long as anything
+//! can call it.
 
-use std::ffi::{CStr, c_char};
+use std::cell::Cell;
+use std::ffi::{CStr, c_char, c_uint};
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::abi::{ABI_VERSION, WaterWpeRuntime, WpeApi};
+use crate::abi::{
+    ABI_VERSION, WaterWpePollFd as AbiPollFd, WaterWpeReadiness as AbiReadiness, WaterWpeRuntime,
+    WpeApi,
+};
+use crate::pump::{PumpDeadline, WpePollFd, WpeReadiness};
 
 /// Exact WPE `WebKit` line used by the bundled runtime.
-pub const WPE_WEBKIT_VERSION: &str = "2.52.5";
+pub const WPE_WEBKIT_VERSION: &str = "2.54.2";
+
+/// How many descriptors a readiness report is asked for before it has to ask
+/// again with a larger buffer.
+///
+/// A WPE main context watches its own wakeup descriptor plus a handful per web
+/// and network process, so this is sized to answer in one call and grows from
+/// the count the bridge reports when it does not.
+const INITIAL_DESCRIPTOR_CAPACITY: usize = 16;
 
 #[derive(Deserialize)]
 struct RuntimeIdentity {
@@ -71,6 +88,14 @@ impl WpeRuntimePaths {
             "bundled WPE bridge is missing at {}. Package or run the app through `water` so WPE WebKit {WPE_WEBKIT_VERSION} is staged",
             bridge.display()
         );
+        let extension = self
+            .root
+            .join("lib/waterui-wpe/extensions/waterui_wpe_extension.so");
+        assert!(
+            extension.is_file(),
+            "bundled WPE web-process extension is missing at {}",
+            extension.display()
+        );
         let manifest = self.root.join("runtime.json");
         assert!(
             manifest.is_file(),
@@ -123,9 +148,43 @@ impl WpeRuntimePaths {
     }
 }
 
+/// The loader's only compatibility gate: the bridge reports the ABI it was
+/// built against, and anything but the exact version this crate declares is
+/// refused before a single other symbol is trusted.
+/// `load`'s order contract lifted out: the reported version is produced and
+/// validated before `resolve_rest` is ever called, so a bridge answering the
+/// wrong ABI is rejected without another symbol being touched.
+fn load_checked<T>(version: impl FnOnce() -> u32, resolve_rest: impl FnOnce() -> T) -> T {
+    assert_abi_version(version());
+    resolve_rest()
+}
+
+fn assert_abi_version(reported: u32) {
+    assert_eq!(
+        reported, ABI_VERSION,
+        "bundled WPE bridge ABI mismatch: runtime={reported}, WaterUI={ABI_VERSION}"
+    );
+}
+
 pub struct RuntimeApi {
     pub api: WpeApi,
-    _library: libloading::Library,
+    /// The bridge, mapped for the life of the process.
+    ///
+    /// It is deliberately never closed. `dlclose` on this module is unsound
+    /// twice over: the bridge registers `GObject` types — `WaterView`,
+    /// `WaterToplevel`, `WaterDisplay` — and `GLib`'s type system keeps the
+    /// class and instance initializers it was handed forever, so unmapping the
+    /// code they live in leaves the type system pointing into nothing; and WPE
+    /// `WebKit` runs worker threads that no teardown call joins — `GStreamer`'s,
+    /// WTF's, the vblank monitor — so unloading the engine out from under them
+    /// stops whichever one was running. The smoke reported the second of those
+    /// as a SIGSEGV at an unmapped address on a thread that was still running
+    /// while the main thread dropped this handle.
+    ///
+    /// Dropping a `WpeRuntime` is still fine: the engine's threads keep running
+    /// against code that is still mapped, and the process reclaims all of it on
+    /// exit.
+    _library: ManuallyDrop<libloading::Library>,
 }
 
 impl RuntimeApi {
@@ -140,26 +199,33 @@ impl RuntimeApi {
                 bridge.display()
             )
         });
+        // The version gate runs before any other symbol is trusted: resolve
+        // only `abi_version`, check it, and only then look up the rest of the
+        // table — a bridge answering the wrong ABI is rejected without the
+        // signatures it might disagree on ever being named.
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
-        let api = unsafe { WpeApi::load(&library) };
-        // SAFETY: symbol resolved from the bridge library kept mapped by this
-        // runtime; see the module safety note.
-        let version = unsafe { (api.abi_version)() };
-        assert_eq!(
-            version, ABI_VERSION,
-            "bundled WPE bridge ABI mismatch: runtime={version}, WaterUI={ABI_VERSION}"
+        let abi_version: unsafe extern "C" fn() -> u32 =
+            unsafe { crate::abi::symbol(&library, b"water_wpe_abi_version\0") };
+        // SAFETY: `abi_version` resolved from the bridge library kept mapped by
+        // this runtime; see the module safety note.
+        let api = load_checked(
+            // SAFETY: see the module safety note.
+            || unsafe { abi_version() },
+            // SAFETY: every remaining symbol resolved from the bridge library
+            // kept mapped by this runtime; see the module safety note.
+            || unsafe { WpeApi::load(&library) },
         );
         Arc::new(Self {
             api,
-            _library: library,
+            _library: ManuallyDrop::new(library),
         })
     }
 }
 
 // SAFETY: the bridge ABI explicitly permits calling the frame-completion
-// functions from wgpu's completion thread, and libloading keeps the module mapped
-// until the final `Arc` drops, so the function pointers stay valid.
+// functions from wgpu's completion thread, and the module stays mapped for the
+// life of the process, so the function pointers stay valid.
 unsafe impl Send for RuntimeApi {}
 // SAFETY: see the `Send` impl — the API holds only function pointers into a module
 // that stays mapped, with no interior mutability.
@@ -168,20 +234,31 @@ unsafe impl Sync for RuntimeApi {}
 struct RuntimeInner {
     api: Arc<RuntimeApi>,
     raw: NonNull<WaterWpeRuntime>,
+    /// Whether [`WpeRuntime::start_message_pump`] already spawned this runtime's
+    /// pump task. Every controller that resolves this runtime asks for it, and
+    /// one main context needs exactly one loop driving it.
+    pump_running: Cell<bool>,
 }
 
 impl Drop for RuntimeInner {
+    /// Frees the runtime, and says so on both sides of the call.
+    ///
+    /// `water_wpe_runtime_free` drains the main context before it releases the
+    /// display, so the two events bracket every queued frame completion that
+    /// had not run yet.
     fn drop(&mut self) {
+        tracing::debug!("freeing the WPE runtime");
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.api.api.runtime_free)(self.raw.as_ptr()) };
+        tracing::debug!("freed the WPE runtime");
     }
 }
 
 /// Main-thread WPE `WebKit` runtime.
 #[derive(Clone)]
 pub struct WpeRuntime {
-    inner: std::rc::Rc<RuntimeInner>,
+    inner: Rc<RuntimeInner>,
 }
 
 impl core::fmt::Debug for WpeRuntime {
@@ -193,10 +270,18 @@ impl core::fmt::Debug for WpeRuntime {
 impl WpeRuntime {
     /// Loads and initializes the exact staged WPE runtime.
     ///
+    /// One runtime is live per process at a time. WPE `WebKit` is a process-wide
+    /// singleton — its `GLib` types and its display belong to one runtime on
+    /// the thread that owns its main context — so a second one is refused by
+    /// the bridge rather than left to abort somewhere inside the engine.
+    /// Dropping a [`WpeRuntime`] releases the claim; work that needs two
+    /// belongs in two processes, which is why the real-engine tests run one
+    /// test per process.
+    ///
     /// # Panics
     ///
-    /// Panics when the runtime is missing, invalid, ABI-incompatible, or fails
-    /// to initialize.
+    /// Panics when the runtime is missing, invalid, ABI-incompatible, already
+    /// live in this process, or fails to initialize.
     #[must_use]
     pub fn initialize(paths: &WpeRuntimePaths) -> Self {
         let api = RuntimeApi::load(paths);
@@ -213,7 +298,11 @@ impl WpeRuntime {
             "WPE runtime initialized while also returning an error"
         );
         Self {
-            inner: std::rc::Rc::new(RuntimeInner { api, raw }),
+            inner: Rc::new(RuntimeInner {
+                api,
+                raw,
+                pump_running: Cell::new(false),
+            }),
         }
     }
 
@@ -225,6 +314,104 @@ impl WpeRuntime {
         // SAFETY: symbol resolved from the bridge library kept mapped by this
         // runtime; see the module safety note.
         unsafe { (self.inner.api.api.runtime_iteration)(self.inner.raw.as_ptr()) }
+    }
+
+    /// Reports what the runtime's `GLib` main context is waiting for.
+    ///
+    /// Nothing is dispatched: this asks every source when it next wants to run,
+    /// so a host can schedule [`Self::iteration`] against the engine's own
+    /// deadline and descriptors instead of an interval it invented.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the bridge reports more descriptors than a `usize` holds.
+    #[must_use]
+    pub fn readiness(&self) -> WpeReadiness {
+        let mut report = AbiReadiness::default();
+        let mut descriptors = vec![AbiPollFd::default(); INITIAL_DESCRIPTOR_CAPACITY];
+        loop {
+            let capacity = c_uint::try_from(descriptors.len())
+                .expect("the WPE descriptor buffer is sized by this crate");
+            // SAFETY: symbol resolved from the bridge library kept mapped by
+            // this runtime; see the module safety note. The buffer is `capacity`
+            // entries long, which is what the bridge is told it may write.
+            let needed = unsafe {
+                (self.inner.api.api.runtime_readiness)(
+                    self.inner.raw.as_ptr(),
+                    &raw mut report,
+                    descriptors.as_mut_ptr(),
+                    capacity,
+                )
+            };
+            let needed = usize::try_from(needed)
+                .expect("the WPE bridge reported more descriptors than a usize holds");
+            if needed <= descriptors.len() {
+                descriptors.truncate(needed);
+                break;
+            }
+            // The bridge wrote nothing and answered with the size it needs; ask
+            // again with a buffer that large, as `g_main_context_query` is used.
+            descriptors.resize(needed, AbiPollFd::default());
+        }
+        WpeReadiness::new(
+            report.ready,
+            report.timeout_ms,
+            descriptors
+                .into_iter()
+                .map(|descriptor| WpePollFd::new(descriptor.fd, descriptor.events))
+                .collect(),
+        )
+    }
+
+    /// Dispatches everything WPE has ready and reports when it wants the loop
+    /// back.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the bridge reports more descriptors than a `usize` holds.
+    #[must_use]
+    pub fn pump(&self) -> PumpDeadline {
+        while self.iteration() {}
+        self.readiness().deadline()
+    }
+
+    /// Drives this runtime's main loop from `WaterUI`'s UI executor.
+    ///
+    /// WPE's engine work runs on the thread that created the runtime — the UI
+    /// thread — and it has to keep running whether or not anything is being
+    /// drawn. A page only produces frames while its main context is iterated,
+    /// and a renderer that skips idle frames stops drawing exactly when a page
+    /// has nothing new to show, so a pump that lives inside rendering deadlocks
+    /// the two against each other: no frame, no pump, no frame. Background
+    /// timers, network completions and DOM mutations then wait for an unrelated
+    /// event — a moved pointer — to force a frame. This task is therefore
+    /// independent of every surface, and a page that wakes up asks for a redraw
+    /// through the frame sink's waker.
+    ///
+    /// The loop is paced by `GLib` itself: [`Self::pump`] returns the instant the
+    /// main context asked to be iterated at, and the task sleeps exactly that
+    /// long. Calling this more than once for one runtime is a no-op, so every
+    /// controller that resolves a runtime may ask for it.
+    ///
+    /// The task holds no strong reference to the runtime and ends when the last
+    /// one is dropped.
+    pub fn start_message_pump(&self) {
+        if self.inner.pump_running.replace(true) {
+            return;
+        }
+        let runtime: Weak<RuntimeInner> = Rc::downgrade(&self.inner);
+        executor_core::spawn_local(async move {
+            loop {
+                let Some(inner) = runtime.upgrade() else {
+                    return;
+                };
+                // The strong reference must not be held across the await, or
+                // this task would keep WPE alive for the life of the process.
+                let deadline = Self { inner }.pump().instant();
+                futures_timer::Delay::new(deadline.saturating_duration_since(Instant::now())).await;
+            }
+        })
+        .detach();
     }
 
     pub(super) fn raw(&self) -> NonNull<WaterWpeRuntime> {
@@ -247,4 +434,62 @@ pub fn take_error(api: &RuntimeApi, error: *mut c_char) -> String {
     // see the module safety note.
     unsafe { (api.api.string_free)(error) };
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assert_abi_version;
+
+    #[test]
+    fn the_loader_accepts_the_declared_abi() {
+        assert_abi_version(super::ABI_VERSION);
+    }
+
+    #[test]
+    #[should_panic(expected = "ABI mismatch")]
+    fn the_loader_rejects_an_abi4_bridge() {
+        assert_abi_version(4);
+    }
+}
+
+#[cfg(test)]
+mod loader_order_tests {
+    use super::load_checked;
+    use std::cell::RefCell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    /// The whole contract `load` exists for, proven without a bridge: when the
+    /// version probe reports a rejected ABI, the resolver that would name the
+    /// rest of the table is never reached.
+    #[test]
+    fn a_rejected_version_never_resolves_the_table() {
+        let calls = RefCell::new(Vec::new());
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            load_checked(
+                || {
+                    calls.borrow_mut().push("abi_version");
+                    4
+                },
+                || calls.borrow_mut().push("WpeApi::load"),
+            );
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(*calls.borrow(), vec!["abi_version"]);
+    }
+
+    /// And the acceptance path resolves the table after the probe, in order.
+    #[test]
+    fn an_accepted_version_resolves_the_table_afterwards() {
+        let calls = RefCell::new(Vec::new());
+        load_checked(
+            || {
+                calls.borrow_mut().push("abi_version");
+                super::ABI_VERSION
+            },
+            || {
+                calls.borrow_mut().push("WpeApi::load");
+            },
+        );
+        assert_eq!(*calls.borrow(), vec!["abi_version", "WpeApi::load"]);
+    }
 }

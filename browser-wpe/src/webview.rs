@@ -1,12 +1,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cookie::{Cookie, SameSite, time::OffsetDateTime};
+use cookie::{Cookie, SameSite};
 use nami::watcher::BoxWatcherGuard;
 use serde::Deserialize;
 use waterui_core::{Computed, Signal};
 use waterui_url::Url;
-use waterui_webview::{CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebViewHandle};
+use waterui_webview::{
+    ASSET_ORIGIN, CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebViewConfig,
+    WebViewHandle, WebViewOpenError,
+};
 
 use crate::{WpePage, WpeRuntime, WpeRuntimePaths};
 
@@ -69,13 +72,15 @@ impl WpeController {
     /// backend installs the controller, so the requirement lands on the code
     /// that needs it instead of on every application built with this engine.
     fn runtime(&self) -> WpeRuntime {
-        match self.source.as_ref() {
+        let runtime = match self.source.as_ref() {
             RuntimeSource::Ready(runtime) => runtime.clone(),
             RuntimeSource::Packaged { paths, runtime } => runtime
                 .borrow_mut()
                 .get_or_insert_with(|| WpeRuntime::initialize(paths))
                 .clone(),
-        }
+        };
+        runtime.start_message_pump();
+        runtime
     }
 
     /// Dispatches all currently-ready WPE tasks.
@@ -97,23 +102,40 @@ impl WpeController {
 }
 
 impl CustomWebViewController for WpeController {
-    fn open(&self) -> impl WebViewHandle {
-        WpeWebViewHandle::new(WpePage::new(self.runtime()))
+    fn open(&self, config: WebViewConfig) -> Result<impl WebViewHandle, WebViewOpenError> {
+        Ok(WpeWebViewHandle::new(WpePage::new(self.runtime()), &config))
+    }
+
+    fn asset_origin(&self) -> Option<Url> {
+        Some(Url::new(ASSET_ORIGIN))
     }
 }
 
 /// Adapts the shared bridge's one-function transport onto WPE's message handler.
-const TRANSPORT_SCRIPT: &str = concat!(
-    "globalThis.__wateruiSend = function (envelope) {",
-    "globalThis.webkit.messageHandlers.__waterui.postMessage(envelope);",
-    "};"
-);
+const TRANSPORT_SCRIPT: &str = include_str!("transport.js");
 
 /// The key the transport adapter is injected under.
 const TRANSPORT_SCRIPT_KEY: &str = "waterui:wpe-transport";
 
 /// The key the shared bridge and evaluation wrapper are injected under.
 const BRIDGE_SCRIPT_KEY: &str = "waterui:bridge";
+
+impl WpePage {
+    /// Installs the shared bridge script and the transport adapter, ahead of any
+    /// keyed script.
+    ///
+    /// Bridge first: the adapter binds the bridge's own resolver when it runs,
+    /// before any page script can replace it, and nothing calls `__wateruiSend`
+    /// until a keyed script (the state seed) or the page does.
+    pub fn install_bridge_scripts(&self) {
+        self.add_script(
+            BRIDGE_SCRIPT_KEY,
+            waterui_webview::DOCUMENT_START_SCRIPT,
+            false,
+        );
+        self.add_script(TRANSPORT_SCRIPT_KEY, TRANSPORT_SCRIPT, false);
+    }
+}
 
 type RedirectSubscription = Option<(Computed<bool>, BoxWatcherGuard)>;
 
@@ -133,17 +155,24 @@ impl core::fmt::Debug for WpeWebViewHandle {
 }
 
 impl WpeWebViewHandle {
-    /// Creates a standard handle around `page`.
+    /// Creates a standard handle around a blank `page`, configured with
+    /// `config` before anything can navigate it: the asset server on the
+    /// page's web context, the admission rules, the bridge and the
+    /// creation-time scripts.
     #[must_use]
-    pub fn new(page: WpePage) -> Self {
-        // Transport first: the shared script calls `__wateruiSend`, so the adapter
-        // onto WPE's single WebKit message handler has to exist before it runs.
-        page.add_script(TRANSPORT_SCRIPT_KEY, TRANSPORT_SCRIPT, false);
-        page.add_script(
-            BRIDGE_SCRIPT_KEY,
-            waterui_webview::DOCUMENT_START_SCRIPT,
-            false,
-        );
+    pub fn new(page: WpePage, config: &WebViewConfig) -> Self {
+        page.install_bridge_scripts();
+        for script in config.user_scripts() {
+            page.add_script(
+                script.key(),
+                script.source(),
+                script.time() == ScriptInjectionTime::DocumentEnd,
+            );
+        }
+        page.set_bridge_origins(config.bridge_origins().clone());
+        if let Some(server) = config.asset_server() {
+            page.set_asset_server(server.clone());
+        }
         Self {
             page,
             redirects: Rc::new(RefCell::new(None)),
@@ -179,10 +208,6 @@ impl WebViewHandle for WpeWebViewHandle {
         self.page.add_handler(name, handler);
     }
 
-    fn set_bridge_origins(&self, policy: waterui_webview::OriginPolicy) {
-        self.page.set_bridge_origins(policy);
-    }
-
     fn remove_handler(&self, name: &str) {
         self.page.remove_handler(name);
     }
@@ -201,7 +226,7 @@ impl WebViewHandle for WpeWebViewHandle {
 
     fn set_redirects_enabled(&self, enabled: impl Signal<Output = bool>) {
         let enabled = Computed::new(enabled);
-        self.page.set_redirects_enabled(enabled.get());
+        self.page.set_redirects_enabled(enabled.snapshot());
         let page = self.page.clone();
         let guard = enabled.watch(move |context| {
             page.set_redirects_enabled(context.into_value());
@@ -229,37 +254,34 @@ impl WebViewHandle for WpeWebViewHandle {
         clippy::future_not_send,
         reason = "WPE WebKit and WaterUI view state are confined to the UI thread"
     )]
-    async fn get_cookies(&self) -> Vec<Cookie<'static>> {
-        let json = self.page.cookies_json().await;
-        // The store holds whatever the pages this view visited put there, so a
-        // record this crate cannot read is the web's business, not a reason to
-        // abort the application.
-        let records: Vec<CookieRecord> = match serde_json::from_str(&json) {
-            Ok(records) => records,
-            Err(error) => {
-                tracing::warn!(%error, "WPE returned cookies this backend cannot read");
-                return Vec::new();
-            }
-        };
-        records.into_iter().map(CookieRecord::into_cookie).collect()
+    async fn get_cookies(&self) -> Result<Vec<Cookie<'static>>, waterui_core::Error> {
+        let json = self.page.cookies_json().await.map_err(|error| {
+            waterui_core::Error::msg(format!("WPE cookie query failed: {error}"))
+        })?;
+        let records: Vec<CookieRecord> = serde_json::from_str(&json).map_err(|error| {
+            waterui_core::Error::new(error).context("WPE returned cookies this backend cannot read")
+        })?;
+        records
+            .into_iter()
+            .map(CookieRecord::into_cookie)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     #[expect(
         clippy::future_not_send,
         reason = "WPE WebKit and WaterUI view state are confined to the UI thread"
     )]
-    async fn run_javascript(&self, script: &str) -> Result<waterui_str::Str, waterui_str::Str> {
-        self.page.run_javascript(script).await
+    async fn run_javascript(&self, script: &str) -> Result<suiteki::Str, suiteki::Str> {
+        self.page
+            .run_javascript(&waterui_webview::raw_evaluation(script))
+            .await
     }
 
     #[expect(
         clippy::future_not_send,
         reason = "WPE WebKit and WaterUI view state are confined to the UI thread"
     )]
-    async fn call_async_javascript(
-        &self,
-        body: &str,
-    ) -> Result<waterui_str::Str, waterui_str::Str> {
+    async fn call_async_javascript(&self, body: &str) -> Result<suiteki::Str, suiteki::Str> {
         self.page.call_async_javascript(body).await
     }
 }
@@ -273,12 +295,13 @@ struct CookieRecord {
     secure: bool,
     http_only: bool,
     same_site: Option<String>,
-    expires: Option<i64>,
+    expires: Option<f64>,
 }
 
 impl CookieRecord {
-    fn into_cookie(self) -> Cookie<'static> {
-        let mut builder = Cookie::build((self.name, self.value))
+    fn into_cookie(self) -> Result<Cookie<'static>, waterui_core::Error> {
+        let name = self.name;
+        let mut builder = Cookie::build((name.clone(), self.value))
             .domain(self.domain)
             .path(self.path)
             .secure(self.secure)
@@ -296,16 +319,9 @@ impl CookieRecord {
                 ),
             }
         }
-        if let Some(expires) = self.expires {
-            match OffsetDateTime::from_unix_timestamp(expires) {
-                Ok(expires) => builder = builder.expires(expires),
-                Err(error) => tracing::warn!(
-                    %error,
-                    expires,
-                    "ignoring a cookie expiry that is outside the representable range"
-                ),
-            }
+        if let Some(seconds) = self.expires {
+            builder = builder.expires(waterui_webview::cookie_expiry(&name, seconds)?);
         }
-        builder.build()
+        Ok(builder.build())
     }
 }

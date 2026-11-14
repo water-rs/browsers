@@ -2,14 +2,17 @@
 
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-    echo "usage: $0 <output-directory>" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "usage: $0 <output-directory> [work-directory]" >&2
     exit 2
 fi
 
-repo_root="$(git rev-parse --show-toplevel)"
-runtime_directory="$repo_root/components/platform/browser-wpe/runtime"
+runtime_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+crate_directory="$(cd "$runtime_directory/.." && pwd)"
+repo_root="$(git -C "$runtime_directory" rev-parse --show-toplevel)"
 source_configuration="$runtime_directory/source.toml"
+crate="waterui-browser-wpe"
+manifest="$crate_directory/Cargo.toml"
 output_directory="$(mkdir -p "$1" && cd "$1" && pwd)"
 
 configuration_value() {
@@ -18,25 +21,29 @@ configuration_value() {
 }
 
 version="$(configuration_value version)"
-source_url="$(configuration_value source_url)"
-source_sha256="$(configuration_value source_sha256)"
-glib_dependencies_url="$(configuration_value glib_dependencies_url)"
-glib_dependencies_sha256="$(configuration_value glib_dependencies_sha256)"
 released="$(configuration_value released)"
 maximum_glibc="$(configuration_value maximum_glibc)"
-minimum_gcc="$(configuration_value minimum_gcc)"
+minimum_clang="$(configuration_value minimum_clang)"
 smoke_timeout_seconds="$(configuration_value smoke_timeout_seconds)"
-cli_wpe_version="$(
-    sed -n 's/^wpe_version = "\([^"]*\)"$/\1/p' "$repo_root/cli/src/browser_runtime.toml"
-)"
+# The pin every consumer reads is the crate's own metadata, so that the `water`
+# CLI can take it from the published crate instead of keeping a copy of its own.
+# It is read through `cargo metadata` because it lives in a TOML file, and a
+# regex over TOML answers wrongly the first time the file is reformatted. The
+# same answer carries the target directory the smoke example is built into,
+# which is cargo's to decide and not this script's to assume.
+crate_metadata="$(cargo metadata --format-version 1 --no-deps --manifest-path "$manifest")"
+# `cargo metadata` answers for the whole workspace, so the crate is picked out by
+# the same name its example is built from below.
+pinned_version="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(next(package for package in json.load(sys.stdin)["packages"] if package["name"] == sys.argv[1])["metadata"]["waterui"]["wpe-runtime"]["version"])' "$crate")"
+target_directory="$(printf '%s' "$crate_metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 
-if [[ -z "$version" || -z "$source_url" || -z "$source_sha256" || -z "$glib_dependencies_url" || -z "$glib_dependencies_sha256" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_gcc" || -z "$smoke_timeout_seconds" ]]; then
+if [[ -z "$version" || -z "$released" || -z "$maximum_glibc" || -z "$minimum_clang" || -z "$smoke_timeout_seconds" ]]; then
     echo "invalid WPE runtime source configuration" >&2
     exit 1
 fi
 
-if [[ "$cli_wpe_version" != "$version" ]]; then
-    echo "WPE runtime source version $version does not match CLI version $cli_wpe_version" >&2
+if [[ "$pinned_version" != "$version" ]]; then
+    echo "WPE runtime source version $version does not match the $crate pin $pinned_version" >&2
     exit 1
 fi
 
@@ -53,27 +60,9 @@ case "$(uname -m)" in
         ;;
 esac
 
-c_compiler="${CC:-cc}"
-cxx_compiler="${CXX:-c++}"
-command -v "$c_compiler" >/dev/null || {
-    echo "WPE runtime C compiler is unavailable: $c_compiler" >&2
-    exit 1
-}
-command -v "$cxx_compiler" >/dev/null || {
-    echo "WPE runtime C++ compiler is unavailable: $cxx_compiler" >&2
-    exit 1
-}
-compiler_banner="$($c_compiler --version | head -n 1)"
-if [[ "$compiler_banner" != *gcc* && "$compiler_banner" != *GCC* ]]; then
-    echo "WPE runtime requires GCC $minimum_gcc or newer; $c_compiler is $compiler_banner" >&2
-    exit 1
-fi
-actual_gcc="$($c_compiler -dumpfullversion -dumpversion)"
-oldest_gcc="$(printf '%s\n%s\n' "$actual_gcc" "$minimum_gcc" | sort -V | head -n 1)"
-if [[ "$oldest_gcc" != "$minimum_gcc" ]]; then
-    echo "WPE WebKit $version requires GCC $minimum_gcc or newer; $c_compiler reports $actual_gcc" >&2
-    exit 1
-fi
+# shellcheck source=SCRIPTDIR/compiler.sh
+source "$runtime_directory/compiler.sh"
+select_wpe_compiler "$minimum_clang" "$version"
 
 actual_glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
 highest_glibc="$(printf '%s\n%s\n' "$actual_glibc" "$maximum_glibc" | sort -V | tail -n 1)"
@@ -82,126 +71,88 @@ if [[ "$highest_glibc" != "$maximum_glibc" ]]; then
     exit 1
 fi
 
-work_directory="$(mktemp -d)"
-trap 'rm -rf "$work_directory"' EXIT
-archive="$work_directory/wpewebkit.tar.xz"
-curl --fail --location --retry 3 --output "$archive" "$source_url"
-printf '%s  %s\n' "$source_sha256" "$archive" | sha256sum --check
-tar -xJf "$archive" -C "$work_directory"
-source_directory="$work_directory/wpewebkit-$version"
-build_directory="$work_directory/build"
-prefix="$work_directory/runtime"
-
-# `Tools/wpe/dependencies/apt` sources this file and the release tarball does
-# not ship it, so upstream's own installer exits before installing anything.
-# Restore it from the tag the tarball was cut from rather than keeping a second,
-# hand-copied dependency list in this repository.
-glib_dependencies="$source_directory/Tools/glib/dependencies/apt"
-if [[ ! -f "$glib_dependencies" ]]; then
-    mkdir -p "$(dirname "$glib_dependencies")"
-    curl --fail --location --retry 3 --output "$glib_dependencies" "$glib_dependencies_url"
-    printf '%s  %s\n' "$glib_dependencies_sha256" "$glib_dependencies" | sha256sum --check
-    chmod +x "$glib_dependencies"
+# A work directory persists across runs — the layout CI restores the stored
+# WebKit prefix into. It comes from the second argument when given, else the
+# `WATERUI_WPE_WORK_DIRECTORY` the workflow sets; without either the build
+# stays as ephemeral as before.
+if [[ $# -eq 2 ]]; then
+    work_directory="$(mkdir -p "$2" && cd "$2" && pwd)"
+elif [[ -n "${WATERUI_WPE_WORK_DIRECTORY:-}" ]]; then
+    work_directory="$(mkdir -p "$WATERUI_WPE_WORK_DIRECTORY" && cd "$WATERUI_WPE_WORK_DIRECTORY" && pwd)"
+else
+    work_directory="$(mktemp -d)"
+    trap 'rm -rf "$work_directory"' EXIT
 fi
+source_directory="$work_directory/wpewebkit-$version"
+prefix="$work_directory/runtime"
+stage="$work_directory/stage"
 
-# Upstream's list mixes developer tooling in with the build dependencies, and
-# two entries make the whole apt transaction unsatisfiable on a current CI
-# image:
-#   * `git-svn` pins `git (< 1:2.34.1-.)`, while GitHub's runner images install
-#     git from a PPA — 2.55 against 22.04's 2.34. It is tooling for the SVN
-#     workflow WebKit has long since left behind; nothing in this build reads
-#     it. apt cannot install it, and one unusable package aborts everything
-#     else with it.
-#   * `libgstreamer1.0-dev` needs `libunwind-dev`, which apt does not pull in
-#     on its own here.
-# Drop the first from the list and install the second alongside our own
-# additions, so the installer fails only for reasons that actually matter.
-sed -i '/git-svn/d' \
-    "$glib_dependencies" \
-    "$source_directory/Tools/wpe/dependencies/apt"
+# The WebKit build is the expensive stage by hours. build-webkit.sh skips it
+# whenever the install prefix carries its completion marker — which is what
+# lets a shim-only change rebuild only the shim, and what the CI prefix store
+# relies on. It also installs the host dependencies the packaging stage vendors
+# from, so it runs on every invocation, marker or not.
+"$runtime_directory/build-webkit.sh" "$work_directory"
 
-# Before upstream's installer, not after: it is `libgstreamer1.0-dev` inside
-# that installer's own list that needs this, so satisfying it afterwards is too
-# late — the installer has already aborted the transaction.
-sudo apt-get install -y --no-install-recommends libunwind-dev
-
-sudo "$source_directory/Tools/wpe/install-dependencies"
-sudo apt-get install -y --no-install-recommends \
-    bubblewrap \
-    cmake \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    ninja-build \
-    patchelf \
-    pax-utils \
-    xdg-dbus-proxy
-
-# `USE_LIBBACKTRACE` defaults on and is a hard requirement when it is, but no
-# Debian or Ubuntu release packages libbacktrace, so configuring fails on every
-# apt-based host. It only symbolizes WebKit's own crash logs, which a shipped
-# runtime does not print.
-cmake \
-    -S "$source_directory" \
-    -B "$build_directory" \
-    -G Ninja \
-    -DPORT=WPE \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$prefix" \
-    -DCMAKE_INSTALL_LIBDIR=lib \
-    -DCMAKE_INSTALL_LIBEXECDIR=libexec \
-    -DCMAKE_C_COMPILER="$c_compiler" \
-    -DCMAKE_CXX_COMPILER="$cxx_compiler" \
-    -DBWRAP_EXECUTABLE=/usr/bin/bwrap \
-    -DDBUS_PROXY_EXECUTABLE=/usr/bin/xdg-dbus-proxy \
-    -DENABLE_API_TESTS=OFF \
-    -DENABLE_BUBBLEWRAP_SANDBOX=ON \
-    -DENABLE_DOCUMENTATION=OFF \
-    -DENABLE_INTROSPECTION=OFF \
-    -DENABLE_JOURNALD_LOG=OFF \
-    -DENABLE_LAYOUT_TESTS=OFF \
-    -DENABLE_MINIBROWSER=OFF \
-    -DENABLE_WPE_LEGACY_API=OFF \
-    -DENABLE_WPE_PLATFORM=ON \
-    -DUSE_LIBBACKTRACE=OFF
-cmake --build "$build_directory" --parallel "${WATERUI_WPE_BUILD_JOBS:-$(nproc)}"
-cmake --install "$build_directory"
+# Everything downstream mutates the tree it works on: the bridge installs its
+# shim, package-runtime.py vendors libraries and rewrites rpaths. Stage a
+# throwaway copy of the install prefix so the prefix itself stays exactly what
+# `cmake --install` produced — re-runs and stored prefixes see a pristine tree.
+rm -rf "$stage"
+cp -a "$prefix" "$stage"
 
 bridge_build_directory="$work_directory/bridge-build"
-PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig" \
+PKG_CONFIG_PATH="$stage/lib/pkgconfig:$stage/share/pkgconfig" \
 cmake \
-    -S "$repo_root/components/platform/browser-wpe/native" \
+    -S "$crate_directory/native" \
     -B "$bridge_build_directory" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$prefix" \
+    -DCMAKE_INSTALL_PREFIX="$stage" \
     -DCMAKE_C_COMPILER="$c_compiler" \
     -DCMAKE_CXX_COMPILER="$cxx_compiler" \
-    -DCMAKE_PREFIX_PATH="$prefix"
+    -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install_dir" \
+    -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install_dir" \
+    -DCMAKE_PREFIX_PATH="$stage"
 cmake --build "$bridge_build_directory"
 cmake --install "$bridge_build_directory"
+
+# `gsettings-desktop-schemas` and `libglib2.0-bin` are for the packaged runtime
+# rather than for the build: the GIO modules the package stages read GSettings,
+# and a schema they cannot find is a `g_error` that kills the network process on
+# the first network load. The first package carries the schemas the proxy
+# resolver reads, the second carries `glib-compile-schemas` and `gsettings`,
+# and `package-runtime.py` compiles and checks them into the artifact. They are
+# installed here, beside the packaging that needs them, so the WebKit build
+# stage — and the cache keyed on its script — does not change for them.
+sudo apt-get install -y --no-install-recommends \
+    gsettings-desktop-schemas \
+    libglib2.0-bin
 
 python3 "$runtime_directory/package-runtime.py" \
     --architecture "$architecture" \
     --maximum-glibc "$maximum_glibc" \
     --output "$output_directory" \
-    --prefix "$prefix" \
+    --prefix "$stage" \
     --released "$released" \
     --repository "$repo_root" \
     --source "$source_directory" \
     --version "$version"
 
+# The smoke run is where a change to this crate lands: build the example
+# against the staged bridge, run it under the packaged runtime, and leave the
+# snapshot and metrics beside the archive for the workflow to upload.
 cargo build \
-    --package waterui-browser-wpe \
+    --manifest-path "$manifest" \
     --example runtime_smoke \
     --features runtime-smoke
-smoke_binary="$repo_root/target/debug/examples/runtime_smoke"
-archive="$output_directory/waterui-wpe-$version-linux-$architecture.zip"
+smoke_binary="$target_directory/debug/examples/runtime_smoke"
 snapshot="$output_directory/wpe-smoke-$version-linux-$architecture.png"
 metrics="$output_directory/wpe-smoke-$version-linux-$architecture.json"
 python3 "$runtime_directory/run-smoke.py" \
-    --archive "$archive" \
+    --archive "$output_directory/waterui-wpe-$version-linux-$architecture.zip" \
     --binary "$smoke_binary" \
-    --metrics "$metrics" \
-    --runtime "$prefix" \
+    --runtime "$stage" \
     --snapshot "$snapshot" \
+    --metrics "$metrics" \
     --timeout-seconds "$smoke_timeout_seconds"

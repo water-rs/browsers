@@ -25,14 +25,51 @@ enum {
     WATER_WPE_EVENT_HISTORY_CHANGED = 7,
 };
 
+static char *water_wpe_runtime_root(void);
+
 struct WaterWpeRuntime {
     GMainContext *context;
     WPEDisplay *delegate;
     WPEDisplay *display;
 };
 
+/* The context-owned `waterui` scheme binding: the Rust callback the URI
+ * handler invokes. The registration's destroy notify frees it when the
+ * context dies; a page that tears down earlier closes the Rust callback
+ * first so the handler can never call freed state. */
+typedef struct {
+    WaterWpeAssetCallback callback;
+    void *user_data;
+    WaterWpeDestroyNotify destroy;
+} WaterWpeAssetBinding;
+
+/* Close the Rust callback exactly once: the fields clear before the foreign
+ * destructor runs, so a re-entrant observer sees the binding already closed.
+ */
+static void water_wpe_asset_binding_close(WaterWpeAssetBinding *binding)
+{
+    WaterWpeDestroyNotify destroy = binding->destroy;
+    void *user_data = binding->user_data;
+    binding->callback = NULL;
+    binding->user_data = NULL;
+    binding->destroy = NULL;
+    if (destroy)
+        destroy(user_data);
+}
+
+/* The context's registration owns the binding: freeing it closes any Rust
+ * callback still installed, then releases the storage. */
+static void water_wpe_asset_binding_free(gpointer data)
+{
+    WaterWpeAssetBinding *binding = data;
+    water_wpe_asset_binding_close(binding);
+    g_free(binding);
+}
+
+
 struct WaterWpePage {
     WaterWpeRuntime *runtime;
+    WebKitWebContext *web_context;
     WebKitWebView *web_view;
     WebKitUserContentManager *content_manager;
     WPEView *view;
@@ -42,18 +79,28 @@ struct WaterWpePage {
     WaterWpeMessageCallback message_callback;
     void *user_data;
     WaterWpeDestroyNotify destroy_user_data;
+    /* The page's `waterui://localhost` binding, borrowed from its context's
+     * scheme registration, or NULL while the page serves no assets. */
+    WaterWpeAssetBinding *asset_binding;
     gboolean redirects_enabled;
     char *last_uri;
+    char *bridge_origin_wire;
     /* Document scripts by key, so injecting again under a key replaces the
      * script instead of stacking another copy in front of it. Owns one
      * reference to each script it names. */
     GHashTable *scripts;
 };
 
+struct WaterWpeReply {
+    WebKitScriptMessageReply *reply;
+    JSCContext *context;
+};
+
 typedef struct {
     GMainContext *context;
     WPEView *view;
     WPEBuffer *buffer;
+    GBytes *data;
     gint references;
 } WaterWpeFrameToken;
 
@@ -103,16 +150,33 @@ static void water_wpe_frame_token_unref(WaterWpeFrameToken *token)
 {
     if (!g_atomic_int_dec_and_test(&token->references))
         return;
+    if (token->data != NULL)
+        g_bytes_unref(token->data);
     g_object_unref(token->buffer);
     g_object_unref(token->view);
     g_main_context_unref(token->context);
     g_free(token);
 }
 
+/* Whether the view a completion names still belongs to a page.
+ *
+ * A completion is queued onto the runtime's context and dispatched whenever the
+ * host next iterates it, which can be after the page has gone: the token holds
+ * the view alive, but `water_wpe_page_free` has already closed it and dropped
+ * the `WebKitWebView` whose side of the view listens for these signals. Telling
+ * a view nobody owns that its buffer came back reaches into that torn-down
+ * listener. The back pointer `water_wpe_page_free` clears is exactly the
+ * question being asked, so it is what answers it. */
+static gboolean water_wpe_frame_token_has_page(WaterWpeFrameToken *token)
+{
+    return ((WaterView *)token->view)->page != NULL;
+}
+
 static gboolean water_wpe_frame_presented_on_main(gpointer user_data)
 {
     WaterWpeFrameToken *token = user_data;
-    wpe_view_buffer_rendered(token->view, token->buffer);
+    if (water_wpe_frame_token_has_page(token))
+        wpe_view_buffer_rendered(token->view, token->buffer);
     water_wpe_frame_token_unref(token);
     return G_SOURCE_REMOVE;
 }
@@ -125,9 +189,16 @@ typedef struct {
 static gboolean water_wpe_frame_released_on_main(gpointer user_data)
 {
     WaterWpeRelease *release = user_data;
-    if (release->release_fence_fd >= 0)
-        wpe_buffer_set_release_fence(release->token->buffer, release->release_fence_fd);
-    wpe_view_buffer_released(release->token->view, release->token->buffer);
+    if (water_wpe_frame_token_has_page(release->token)) {
+        if (release->release_fence_fd >= 0)
+            wpe_buffer_set_release_fence(
+                release->token->buffer,
+                release->release_fence_fd);
+        wpe_view_buffer_released(release->token->view, release->token->buffer);
+    } else if (release->release_fence_fd >= 0) {
+        /* `wpe_buffer_set_release_fence` would have taken the descriptor. */
+        close(release->release_fence_fd);
+    }
     water_wpe_frame_token_unref(release->token);
     g_free(release);
     return G_SOURCE_REMOVE;
@@ -158,6 +229,102 @@ static void water_view_constructed(GObject *object)
         object);
 }
 
+static WaterWpeFrameToken *water_view_frame_token_new(
+    WaterWpePage *page,
+    WPEView *view,
+    WPEBuffer *buffer,
+    GBytes *data)
+{
+    WaterWpeFrameToken *token = g_new0(WaterWpeFrameToken, 1);
+    token->context = g_main_context_ref(page->runtime->context);
+    token->view = g_object_ref(view);
+    token->buffer = g_object_ref(buffer);
+    token->data = data != NULL ? g_bytes_ref(data) : NULL;
+    token->references = 1;
+    return token;
+}
+
+static void water_view_render_dma_buf(
+    WaterWpePage *page,
+    WPEView *view,
+    WPEBuffer *buffer)
+{
+    WPEBufferDMABuf *dma_buf = WPE_BUFFER_DMA_BUF(buffer);
+    guint32 n_planes = wpe_buffer_dma_buf_get_n_planes(dma_buf);
+    g_assert_cmpuint(n_planes, >, 0);
+    g_assert_cmpuint(n_planes, <=, WATER_WPE_MAX_PLANES);
+    g_assert_cmpuint(n_planes, ==, 1);
+    /* GBM reports DRM_FORMAT_MOD_INVALID for buffers whose allocator cannot
+     * express modifiers (dumb/kmsro buffers), but the format contract
+     * advertised to the WebProcess is LINEAR-only, so an unspecified
+     * modifier is linear storage. */
+    guint64 modifier = wpe_buffer_dma_buf_get_modifier(dma_buf);
+    g_assert_true(modifier == DRM_FORMAT_MOD_LINEAR ||
+                  modifier == DRM_FORMAT_MOD_INVALID);
+    if (modifier == DRM_FORMAT_MOD_INVALID)
+        modifier = DRM_FORMAT_MOD_LINEAR;
+
+    WaterWpeFrame frame = {
+        .token = water_view_frame_token_new(page, view, buffer, NULL),
+        .kind = WATER_WPE_FRAME_DMA_BUF,
+        .width = (uint32_t)wpe_buffer_get_width(buffer),
+        .height = (uint32_t)wpe_buffer_get_height(buffer),
+        .format = wpe_buffer_dma_buf_get_format(dma_buf),
+        .modifier = modifier,
+        .n_planes = n_planes,
+        .fds = { -1, -1, -1, -1 },
+        .rendering_fence_fd = wpe_buffer_take_rendering_fence(buffer),
+    };
+    for (guint32 plane = 0; plane < n_planes; ++plane) {
+        int source_fd = wpe_buffer_dma_buf_get_fd(dma_buf, plane);
+        frame.fds[plane] = fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
+        g_assert_cmpint(frame.fds[plane], >=, 0);
+        frame.offsets[plane] = wpe_buffer_dma_buf_get_offset(dma_buf, plane);
+        frame.strides[plane] = wpe_buffer_dma_buf_get_stride(dma_buf, plane);
+    }
+    page->frame_callback(page->user_data, &frame);
+}
+
+/* The other half of the platform's buffer contract: a display with no DRM
+ * render node renders into shared memory instead. There is no plane to export
+ * and no fence to wait on — the pixels are already written — so the frame
+ * carries the mapping itself, alive for as long as its token. */
+static void water_view_render_shm(
+    WaterWpePage *page,
+    WPEView *view,
+    WPEBuffer *buffer)
+{
+    WPEBufferSHM *shm = WPE_BUFFER_SHM(buffer);
+    GBytes *data = wpe_buffer_shm_get_data(shm);
+    if (data == NULL)
+        g_error("WPE shared-memory buffer carries no pixels");
+    gsize len = 0;
+    const guint8 *pixels = g_bytes_get_data(data, &len);
+    guint32 height = (uint32_t)wpe_buffer_get_height(buffer);
+    guint stride = wpe_buffer_shm_get_stride(shm);
+    if ((gsize)stride * height > len)
+        g_error(
+            "WPE shared-memory buffer holds %" G_GSIZE_FORMAT
+            " bytes for %u rows of %u",
+            len,
+            height,
+            stride);
+
+    WaterWpeFrame frame = {
+        .token = water_view_frame_token_new(page, view, buffer, data),
+        .data = pixels,
+        .len = len,
+        .kind = WATER_WPE_FRAME_SHM,
+        .width = (uint32_t)wpe_buffer_get_width(buffer),
+        .height = height,
+        .pixel_format = (uint32_t)wpe_buffer_shm_get_format(shm),
+        .stride = stride,
+        .fds = { -1, -1, -1, -1 },
+        .rendering_fence_fd = -1,
+    };
+    page->frame_callback(page->user_data, &frame);
+}
+
 static gboolean water_view_render_buffer(
     WPEView *view,
     WPEBuffer *buffer,
@@ -171,40 +338,15 @@ static gboolean water_view_render_buffer(
 
     WaterWpePage *page = ((WaterView *)view)->page;
     g_assert(page != NULL);
-    g_assert(WPE_IS_BUFFER_DMA_BUF(buffer));
 
-    WPEBufferDMABuf *dma_buf = WPE_BUFFER_DMA_BUF(buffer);
-    guint32 n_planes = wpe_buffer_dma_buf_get_n_planes(dma_buf);
-    g_assert_cmpuint(n_planes, >, 0);
-    g_assert_cmpuint(n_planes, <=, WATER_WPE_MAX_PLANES);
-    g_assert_cmpuint(n_planes, ==, 1);
-    g_assert_true(
-        wpe_buffer_dma_buf_get_modifier(dma_buf) == DRM_FORMAT_MOD_LINEAR);
-
-    WaterWpeFrameToken *token = g_new0(WaterWpeFrameToken, 1);
-    token->context = g_main_context_ref(page->runtime->context);
-    token->view = g_object_ref(view);
-    token->buffer = g_object_ref(buffer);
-    token->references = 1;
-
-    WaterWpeFrame frame = {
-        .token = token,
-        .width = (uint32_t)wpe_buffer_get_width(buffer),
-        .height = (uint32_t)wpe_buffer_get_height(buffer),
-        .format = wpe_buffer_dma_buf_get_format(dma_buf),
-        .modifier = wpe_buffer_dma_buf_get_modifier(dma_buf),
-        .n_planes = n_planes,
-        .fds = { -1, -1, -1, -1 },
-        .rendering_fence_fd = wpe_buffer_take_rendering_fence(buffer),
-    };
-    for (guint32 plane = 0; plane < n_planes; ++plane) {
-        int source_fd = wpe_buffer_dma_buf_get_fd(dma_buf, plane);
-        frame.fds[plane] = fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
-        g_assert_cmpint(frame.fds[plane], >=, 0);
-        frame.offsets[plane] = wpe_buffer_dma_buf_get_offset(dma_buf, plane);
-        frame.strides[plane] = wpe_buffer_dma_buf_get_stride(dma_buf, plane);
-    }
-    page->frame_callback(page->user_data, &frame);
+    if (WPE_IS_BUFFER_DMA_BUF(buffer))
+        water_view_render_dma_buf(page, view, buffer);
+    else if (WPE_IS_BUFFER_SHM(buffer))
+        water_view_render_shm(page, view, buffer);
+    else
+        g_error(
+            "unsupported WPE buffer type %s",
+            G_OBJECT_TYPE_NAME(buffer));
     return TRUE;
 }
 
@@ -293,7 +435,8 @@ static WPEDRMDevice *water_display_get_drm_device(WPEDisplay *display)
 static WPEBufferFormats *water_display_get_preferred_buffer_formats(
     WPEDisplay *display)
 {
-    return ((WaterDisplay *)display)->formats;
+    /* WebKit adopts this reference; the field keeps its own until dispose. */
+    return g_object_ref(((WaterDisplay *)display)->formats);
 }
 
 static gboolean water_display_use_explicit_sync(WPEDisplay *display)
@@ -335,7 +478,12 @@ static void water_display_init(WaterDisplay *display)
 static char *water_wpe_runtime_root(void)
 {
     Dl_info info;
-    g_assert(dladdr((const void *)&water_wpe_abi_version, &info) != 0);
+    /* ISO C has no function-to-object pointer conversion, so the function's
+     * address is copied through a pointer variable for `dladdr`. */
+    uint32_t (*abi_version)(void) = water_wpe_abi_version;
+    void *self;
+    memcpy(&self, &abi_version, sizeof self);
+    g_assert(dladdr(self, &info) != 0);
     g_assert(info.dli_fname != NULL);
     char *library = g_canonicalize_filename(info.dli_fname, NULL);
     char *lib = g_path_get_dirname(library);
@@ -356,15 +504,30 @@ static void water_wpe_configure_runtime_paths(void)
     char *plugin_scanner =
         g_build_filename(root, "libexec", "gstreamer-1.0", "gst-plugin-scanner", NULL);
     char *gio_modules = g_build_filename(root, "lib", "gio", "modules", NULL);
+    /* WebKit reads WEBKIT_EXEC_PATH only in a DEVELOPER_MODE build; otherwise
+     * it spawns its helper processes from the libexec directory compiled into
+     * the library, which is the prefix the runtime was built at and never the
+     * one it was unpacked into. runtime/build-webkit.sh turns that mode on for
+     * exactly this line. */
     g_setenv("WEBKIT_EXEC_PATH", exec_path, TRUE);
     g_setenv("WEBKIT_INJECTED_BUNDLE_PATH", bundle_path, TRUE);
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_path, TRUE);
     g_setenv("GST_PLUGIN_SCANNER_1_0", plugin_scanner, TRUE);
     g_setenv("GIO_EXTRA_MODULES", gio_modules, TRUE);
+    /* The packaged data directory goes in front of the host's, never in place
+     * of them: everything in this process reads this variable, and the Vulkan
+     * loader finds the host's drivers through `vulkan/icd.d` under it. An
+     * unset or empty variable stands for the XDG Base Directory
+     * specification's default list (`g_get_system_data_dirs` would answer it,
+     * but it caches its first answer, which would then hide the packaged
+     * directory from GLib), so that list is what the packaged one is
+     * prepended to. */
     const char *system_data_path = g_getenv("XDG_DATA_DIRS");
-    char *combined_data_path = system_data_path == NULL
-        ? g_strdup(data_path)
-        : g_strconcat(data_path, G_SEARCHPATH_SEPARATOR_S, system_data_path, NULL);
+    if (system_data_path == NULL || system_data_path[0] == '\0') {
+        system_data_path = "/usr/local/share/:/usr/share/";
+    }
+    char *combined_data_path =
+        g_strconcat(data_path, G_SEARCHPATH_SEPARATOR_S, system_data_path, NULL);
     g_setenv("XDG_DATA_DIRS", combined_data_path, TRUE);
     g_free(combined_data_path);
     g_free(gio_modules);
@@ -380,6 +543,8 @@ uint32_t water_wpe_abi_version(void)
 {
     return WATER_WPE_ABI_VERSION;
 }
+
+static gint water_wpe_runtime_live = 0;
 
 WaterWpeRuntime *water_wpe_runtime_new(char **error)
 {
@@ -398,6 +563,13 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
             WEBKIT_MICRO_VERSION);
         return NULL;
     }
+    if (!g_atomic_int_compare_and_exchange(&water_wpe_runtime_live, 0, 1)) {
+        *error = g_strdup(
+            "a WPE WebKit runtime is already live in this process, and the "
+            "engine allows one at a time: free the first runtime before "
+            "creating another, or run the second in its own process");
+        return NULL;
+    }
     water_wpe_configure_runtime_paths();
 
     WaterWpeRuntime *runtime = g_new0(WaterWpeRuntime, 1);
@@ -410,6 +582,7 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
         g_object_unref(runtime->delegate);
         g_main_context_unref(runtime->context);
         g_free(runtime);
+        g_atomic_int_set(&water_wpe_runtime_live, 0);
         return NULL;
     }
 
@@ -433,7 +606,6 @@ WaterWpeRuntime *water_wpe_runtime_new(char **error)
         DRM_FORMAT_XRGB8888,
         DRM_FORMAT_MOD_LINEAR);
     display->formats = wpe_buffer_formats_builder_end(builder);
-    wpe_buffer_formats_builder_unref(builder);
     runtime->display = WPE_DISPLAY(display);
     return runtime;
 }
@@ -447,12 +619,61 @@ void water_wpe_runtime_free(WaterWpeRuntime *runtime)
     g_object_unref(runtime->delegate);
     g_main_context_unref(runtime->context);
     g_free(runtime);
+    g_atomic_int_set(&water_wpe_runtime_live, 0);
 }
 
 bool water_wpe_runtime_iteration(WaterWpeRuntime *runtime)
 {
     g_assert(runtime != NULL);
     return g_main_context_iteration(runtime->context, FALSE);
+}
+
+uint32_t water_wpe_runtime_readiness(
+    WaterWpeRuntime *runtime,
+    WaterWpeReadiness *readiness,
+    WaterWpePollFd *fds,
+    uint32_t capacity)
+{
+    g_assert(runtime != NULL);
+    g_assert(readiness != NULL);
+    g_assert(capacity == 0 || fds != NULL);
+    g_assert(capacity <= (uint32_t)G_MAXINT);
+
+    /* prepare() and query() have to run under ownership of the context, and the
+     * only thread that ever owns this one is the thread that made the runtime.
+     * Failing to acquire it means WPE is being driven from somewhere it was
+     * never handed to, which is not a state to paper over. */
+    if (!g_main_context_acquire(runtime->context)) {
+        g_error("WPE main context is owned by another thread");
+    }
+
+    gint max_priority = 0;
+    readiness->ready =
+        g_main_context_prepare(runtime->context, &max_priority) ? true : false;
+
+    /* g_main_context_query() writes nothing when the context has more
+     * descriptors than the buffer holds, and answers with the count it needed;
+     * the caller retries with that. */
+    GPollFD *queried = g_new0(GPollFD, capacity > 0 ? capacity : 1);
+    gint timeout_ms = -1;
+    gint n_fds = g_main_context_query(
+        runtime->context,
+        max_priority,
+        &timeout_ms,
+        queried,
+        (gint)capacity);
+    g_main_context_release(runtime->context);
+
+    readiness->timeout_ms = timeout_ms;
+    g_assert(n_fds >= 0);
+    if ((uint32_t)n_fds <= capacity) {
+        for (gint index = 0; index < n_fds; index++) {
+            fds[index].fd = queried[index].fd;
+            fds[index].events = (int16_t)queried[index].events;
+        }
+    }
+    g_free(queried);
+    return (uint32_t)n_fds;
 }
 
 void water_wpe_string_free(char *string)
@@ -601,21 +822,6 @@ static gboolean water_wpe_tls_failed(
     return FALSE;
 }
 
-static void water_wpe_evaluate_without_result(
-    WaterWpePage *page,
-    const char *script)
-{
-    webkit_web_view_evaluate_javascript(
-        page->web_view,
-        script,
-        -1,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL);
-}
-
 /* Drops the reference a page's script table holds. A wrapper rather than a cast
  * of `webkit_user_script_unref` to `GDestroyNotify`, which is a function-pointer
  * cast the build refuses. */
@@ -624,51 +830,48 @@ static void water_wpe_user_script_free(gpointer script)
     webkit_user_script_unref(script);
 }
 
-/* The origin of the document currently loaded in `page`, as
- * `scheme://host[:port]`.
+/* Receives one bridge call from the web-process extension.
  *
- * The engine computes it, so it cannot be spoofed by page script. An opaque
- * origin — a `data:` document, a sandboxed frame — has no string form and comes
- * back empty, which the policy refuses.
- *
- * WPE reports script messages without the frame that sent them: the frame object
- * exists only in the web process extension API, and the UI-process
- * `script-message-received` signal carries the value alone. This is therefore the
- * top document's origin, and it is why `water_wpe_page_add_script` injects into
- * the top frame only. */
-static char *water_wpe_page_origin(WaterWpePage *page)
-{
-    const char *uri = webkit_web_view_get_uri(page->web_view);
-    if (!uri)
-        return g_strdup("");
-    WebKitSecurityOrigin *origin = webkit_security_origin_new_for_uri(uri);
-    if (!origin)
-        return g_strdup("");
-    char *text = webkit_security_origin_to_string(origin);
-    webkit_security_origin_unref(origin);
-    return text ? text : g_strdup("");
-}
-
-static void water_wpe_script_message(
+ * The handler is registered in the `waterui.bridge` script world only, which
+ * page script cannot reach, so every message comes from the extension's binding
+ * for one main-frame document. `origin` is the origin that binding captured
+ * when the document's window object was created, so it names the committed
+ * document that sent the call regardless of any provisional load or process
+ * swap in flight. The reply token answers that document's own promise, and is
+ * dropped with it. */
+static gboolean water_wpe_script_message(
     WebKitUserContentManager *manager,
     JSCValue *value,
+    WebKitScriptMessageReply *script_reply,
     WaterWpePage *page)
 {
     (void)manager;
-    /* The envelope is forwarded verbatim: it is parsed once, in Rust, so its
-     * format is defined in exactly one place. */
-    char *envelope = jsc_value_to_string(value);
-    char *origin = water_wpe_page_origin(page);
-    WaterWpeBytes reply = page->message_callback(page->user_data, origin, envelope);
-    g_free(origin);
-    if (reply.data != NULL && reply.len > 0) {
-        char *script = g_strndup((const char *)reply.data, reply.len);
-        water_wpe_evaluate_without_result(page, script);
-        g_free(script);
-    }
-    if (reply.destroy)
-        reply.destroy(reply.user_data);
+    WaterWpeReply *reply = g_new0(WaterWpeReply, 1);
+    reply->reply = webkit_script_message_reply_ref(script_reply);
+    reply->context = g_object_ref(jsc_value_get_context(value));
+    JSCValue *origin_value = jsc_value_object_get_property(value, "origin");
+    JSCValue *envelope_value = jsc_value_object_get_property(value, "envelope");
+    char *origin = jsc_value_is_string(origin_value)
+        ? jsc_value_to_string(origin_value)
+        : g_strdup("");
+    char *envelope = jsc_value_is_string(envelope_value)
+        ? jsc_value_to_string(envelope_value)
+        : g_strdup("");
+    page->message_callback(page->user_data, reply, origin, envelope);
     g_free(envelope);
+    g_free(origin);
+    g_object_unref(envelope_value);
+    g_object_unref(origin_value);
+    return TRUE;
+}
+
+static void water_wpe_initialize_web_process_extensions(
+    WebKitWebContext *context,
+    WaterWpePage *page)
+{
+    webkit_web_context_set_web_process_extensions_initialization_user_data(
+        context,
+        g_variant_new_string(page->bridge_origin_wire));
 }
 
 WaterWpePage *water_wpe_page_new(
@@ -696,34 +899,76 @@ WaterWpePage *water_wpe_page_new(
     page->user_data = user_data;
     page->destroy_user_data = destroy_user_data;
     page->redirects_enabled = TRUE;
+    page->bridge_origin_wire = g_strdup("");
     page->scripts = g_hash_table_new_full(
         g_str_hash,
         g_str_equal,
         g_free,
         water_wpe_user_script_free);
     page->content_manager = webkit_user_content_manager_new();
-    gboolean registered = webkit_user_content_manager_register_script_message_handler(
-        page->content_manager,
-        "__waterui",
-        NULL);
+    gboolean registered =
+        webkit_user_content_manager_register_script_message_handler_with_reply(
+            page->content_manager,
+            "__waterui",
+            "waterui.bridge");
     g_assert(registered);
     g_signal_connect(
         page->content_manager,
-        "script-message-received::__waterui",
+        "script-message-with-reply-received::__waterui",
         G_CALLBACK(water_wpe_script_message),
         page);
 
+    page->web_context = webkit_web_context_new();
+    char *root = water_wpe_runtime_root();
+    /* The helper processes run inside WebKit's bubblewrap sandbox, which
+     * bind-mounts the system library directories, the prefix compiled into the
+     * library (gone once the runtime is unpacked somewhere else) and, in a
+     * DEVELOPER_MODE build, the parent of WEBKIT_EXEC_PATH -- that is
+     * `libexec`, not the runtime root. A WPEWebProcess spawned from a relocated
+     * runtime therefore cannot see `lib`, and its `$ORIGIN/../../lib` RPATH
+     * fails on libWPEWebKit itself. Mounting the runtime root read-only is the
+     * API for exactly this, and it only applies to a context that has not
+     * spawned a process yet: every page owns a fresh context, so each one
+     * mounts the root here, before its web view exists. */
+    webkit_web_context_add_path_to_sandbox(page->web_context, root, TRUE);
+    char *extension_directory =
+        g_build_filename(root, "lib", "waterui-wpe", "extensions", NULL);
+    webkit_web_context_set_web_process_extensions_directory(
+        page->web_context, extension_directory);
+    g_free(extension_directory);
+    g_free(root);
+    g_signal_connect(
+        page->web_context,
+        "initialize-web-process-extensions",
+        G_CALLBACK(water_wpe_initialize_web_process_extensions),
+        page);
+    webkit_web_context_set_web_process_extensions_initialization_user_data(
+        page->web_context,
+        g_variant_new_string(page->bridge_origin_wire));
     page->web_view = WEBKIT_WEB_VIEW(g_object_new(
         WEBKIT_TYPE_WEB_VIEW,
         "display",
         runtime->display,
+        "web-context",
+        page->web_context,
         "user-content-manager",
         page->content_manager,
         NULL));
-    WebKitSettings *settings = webkit_web_view_get_settings(page->web_view);
-    webkit_settings_set_hardware_acceleration_policy(
-        settings,
-        WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
+    /* WPE 2.52 has no hardware-acceleration setting: the
+     * `WebKitHardwareAccelerationPolicy` API is `#if PLATFORM(GTK)` in
+     * `WebKitSettings.h`, and the WPE platform renders through `WPEView`'s
+     * buffer pipeline, which is always accelerated. */
+    /* A JavaScript error in the injected bridge is reported to the page's own
+     * console, and the console goes nowhere by default: a page whose bridge
+     * threw is indistinguishable from one that simply never answered. Setting
+     * `WATERUI_WPE_CONSOLE` routes it to stdout, which is how a run that fails
+     * on a silent page gets to say why. It is off unless asked for, because a
+     * shipped application has no business printing a page's console to its
+     * standard output. */
+    if (g_getenv("WATERUI_WPE_CONSOLE") != NULL)
+        webkit_settings_set_enable_write_console_messages_to_stdout(
+            webkit_web_view_get_settings(page->web_view),
+            TRUE);
     page->view = webkit_web_view_get_wpe_view(page->web_view);
     g_assert(WATER_IS_VIEW(page->view));
     ((WaterView *)page->view)->page = page;
@@ -773,16 +1018,250 @@ WaterWpePage *water_wpe_page_new(
 void water_wpe_page_free(WaterWpePage *page)
 {
     g_assert(page != NULL);
+    /* Retained emitters outlive the page — WebKit's message task holds the
+     * web view, and the context and content manager are shared objects — so
+     * every handler carrying it as user data disconnects before anything it
+     * owns starts tearing down. */
+    g_signal_handlers_disconnect_by_data(page->web_view, page);
+    g_signal_handlers_disconnect_by_data(page->web_context, page);
+    g_signal_handlers_disconnect_by_data(page->content_manager, page);
+    if (page->asset_binding) {
+        /* Close the Rust callback before the page's destructors run; the
+         * binding stays allocated, owned by the context's registration. */
+        water_wpe_asset_binding_close(page->asset_binding);
+    }
     ((WaterView *)page->view)->page = NULL;
     wpe_view_closed(page->view);
     wpe_toplevel_closed(page->toplevel);
     g_object_unref(page->toplevel);
     g_object_unref(page->web_view);
+    g_object_unref(page->web_context);
     g_object_unref(page->content_manager);
     g_hash_table_unref(page->scripts);
     page->destroy_user_data(page->user_data);
     g_free(page->last_uri);
+    g_free(page->bridge_origin_wire);
     g_free(page);
+}
+
+static void water_wpe_bridge_origins_sent(
+    GObject *object,
+    GAsyncResult *result,
+    gpointer user_data)
+{
+    (void)user_data;
+    GError *error = NULL;
+    WebKitUserMessage *reply = webkit_web_view_send_message_to_page_finish(
+        WEBKIT_WEB_VIEW(object), result, &error);
+    if (reply)
+        g_object_unref(reply);
+    if (error) {
+        g_debug("failed to update WPE web-process bridge origins: %s", error->message);
+        g_error_free(error);
+    }
+}
+
+void water_wpe_page_set_bridge_origins(WaterWpePage *page, const char *wire)
+{
+    g_assert(page != NULL);
+    g_assert(wire != NULL);
+    g_free(page->bridge_origin_wire);
+    page->bridge_origin_wire = g_strdup(wire);
+    webkit_web_context_set_web_process_extensions_initialization_user_data(
+        page->web_context,
+        g_variant_new_string(page->bridge_origin_wire));
+    WebKitUserMessage *message = webkit_user_message_new(
+        "waterui.bridge-origins",
+        g_variant_new_string(page->bridge_origin_wire));
+    webkit_web_view_send_message_to_page(
+        page->web_view,
+        message,
+        NULL,
+        water_wpe_bridge_origins_sent,
+        NULL);
+}
+
+typedef struct {
+    WaterWpeResultCallback callback;
+    void *user_data;
+} WaterWpeProcessIdentifierRequest;
+
+static void water_wpe_process_identifier_received(
+    GObject *object,
+    GAsyncResult *result,
+    gpointer user_data)
+{
+    WaterWpeProcessIdentifierRequest *request = user_data;
+    GError *error = NULL;
+    WebKitUserMessage *reply = webkit_web_view_send_message_to_page_finish(
+        WEBKIT_WEB_VIEW(object), result, &error);
+    GVariant *parameters =
+        reply ? webkit_user_message_get_parameters(reply) : NULL;
+    if (parameters &&
+        g_variant_is_of_type(parameters, G_VARIANT_TYPE_STRING) &&
+        g_uuid_string_is_valid(g_variant_get_string(parameters, NULL))) {
+        const char *identifier = g_variant_get_string(parameters, NULL);
+        request->callback(
+            request->user_data, true, identifier, strlen(identifier));
+    } else {
+        const char *message =
+            error ? error->message : "WPE web process returned no identifier";
+        request->callback(
+            request->user_data, false, message, strlen(message));
+    }
+    if (reply)
+        g_object_unref(reply);
+    if (error)
+        g_error_free(error);
+    g_free(request);
+}
+
+void water_wpe_page_get_web_process_identifier(
+    WaterWpePage *page,
+    WaterWpeResultCallback callback,
+    void *user_data)
+{
+    g_assert(page != NULL);
+    g_assert(callback != NULL);
+    WaterWpeProcessIdentifierRequest *request =
+        g_new0(WaterWpeProcessIdentifierRequest, 1);
+    request->callback = callback;
+    request->user_data = user_data;
+    WebKitUserMessage *message =
+        webkit_user_message_new("waterui.bridge-process-id", NULL);
+    webkit_web_view_send_message_to_page(
+        page->web_view,
+        message,
+        NULL,
+        water_wpe_process_identifier_received,
+        request);
+}
+
+void water_wpe_reply_return(WaterWpeReply *reply, const char *json, size_t len)
+{
+    g_assert(reply != NULL);
+    g_assert(json != NULL);
+    char *text = g_strndup(json, len);
+    JSCValue *value = jsc_value_new_from_json(reply->context, text);
+    g_assert(value != NULL);
+    webkit_script_message_reply_return_value(reply->reply, value);
+    g_object_unref(value);
+    g_free(text);
+}
+
+void water_wpe_reply_free(WaterWpeReply *reply)
+{
+    if (!reply)
+        return;
+    webkit_script_message_reply_unref(reply->reply);
+    g_object_unref(reply->context);
+    g_free(reply);
+}
+
+/* Answers one `waterui` request WebKit routed to the shared web context. The
+ * binding the registration carries is the page's own asset server; a closed
+ * one fails the request rather than answering for a torn-down page. The URI
+ * the engine reports is handed to the callback whole; the host, method and
+ * traversal rules live on the Rust side, which shares them with every other
+ * engine. */
+static void water_wpe_scheme_request(
+    WebKitURISchemeRequest *request,
+    gpointer user_data)
+{
+    WaterWpeAssetBinding *binding = user_data;
+    if (!binding->callback) {
+        GError *error = g_error_new_literal(
+            G_IO_ERROR,
+            G_IO_ERROR_CLOSED,
+            "the waterui asset server is closed");
+        webkit_uri_scheme_request_finish_error(request, error);
+        g_error_free(error);
+        return;
+    }
+    WaterWpeAssetResponse response = binding->callback(
+        binding->user_data,
+        webkit_uri_scheme_request_get_http_method(request),
+        webkit_uri_scheme_request_get_uri(request));
+
+    GInputStream *stream = g_memory_input_stream_new_from_data(
+        g_memdup2(response.body.data, response.body.len),
+        (gssize)response.body.len,
+        g_free);
+    WebKitURISchemeResponse *webkit_response =
+        webkit_uri_scheme_response_new(stream, (gint64)response.body.len);
+    webkit_uri_scheme_response_set_status(
+        webkit_response, response.status, NULL);
+    SoupMessageHeaders *headers =
+        soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE);
+    /* `headers` arrives as "Name: value" lines joined by `\n` — the same wire
+     * form the FFI asset contract uses. */
+    char *lines = g_strndup(
+        (const char *)response.headers.data, response.headers.len);
+    for (char *line = lines; line && *line;) {
+        char *end = strchr(line, '\n');
+        if (end)
+            *end = '\0';
+        char *colon = strchr(line, ':');
+        if (colon) {
+            *colon = '\0';
+            char *value = colon + 1;
+            while (*value == ' ')
+                ++value;
+            soup_message_headers_append(headers, line, value);
+        }
+        line = end ? end + 1 : NULL;
+    }
+    g_free(lines);
+    webkit_uri_scheme_response_set_http_headers(webkit_response, headers);
+    webkit_uri_scheme_request_finish_with_response(request, webkit_response);
+    g_object_unref(webkit_response);
+    g_object_unref(stream);
+
+    if (response.headers.destroy)
+        response.headers.destroy(response.headers.user_data);
+    if (response.body.destroy)
+        response.body.destroy(response.body.user_data);
+}
+
+void water_wpe_page_set_asset_server(
+    WaterWpePage *page,
+    WaterWpeAssetCallback callback,
+    void *user_data,
+    WaterWpeDestroyNotify destroy)
+{
+    g_assert(page != NULL);
+    g_assert(callback != NULL);
+    g_assert(destroy != NULL);
+    if (!page->asset_binding) {
+        /* The first registration hands the binding to the context, whose
+         * destroy notify frees it; the page only borrows the pointer. */
+        page->asset_binding = g_new0(WaterWpeAssetBinding, 1);
+        webkit_web_context_register_uri_scheme(
+            page->web_context,
+            "waterui",
+            water_wpe_scheme_request,
+            page->asset_binding,
+            water_wpe_asset_binding_free);
+        WebKitSecurityManager *manager =
+            webkit_web_context_get_security_manager(page->web_context);
+        /* `secure` and `local` give the origin `isSecureContext` and
+         * same-origin storage; `cors_enabled` keeps `fetch` honouring CORS. */
+        webkit_security_manager_register_uri_scheme_as_secure(manager, "waterui");
+        webkit_security_manager_register_uri_scheme_as_local(manager, "waterui");
+        webkit_security_manager_register_uri_scheme_as_cors_enabled(
+            manager, "waterui");
+        page->asset_binding->callback = callback;
+        page->asset_binding->user_data = user_data;
+        page->asset_binding->destroy = destroy;
+        return;
+    }
+    /* Install first, close second: a foreign destructor that re-enters this
+     * function finds the new callback already installed and nests inside it
+     * instead of being clobbered by the outer write. */
+    WaterWpeAssetBinding previous = *page->asset_binding;
+    *page->asset_binding =
+        (WaterWpeAssetBinding) { callback, user_data, destroy };
+    water_wpe_asset_binding_close(&previous);
 }
 
 void water_wpe_page_load_uri(WaterWpePage *page, const char *uri)
@@ -863,17 +1342,13 @@ void water_wpe_page_pointer_button(
     uint32_t button,
     double x,
     double y,
+    uint32_t click_count,
     uint32_t modifiers,
     uint32_t time_ms)
 {
+    g_assert_cmpuint(click_count, >, 0);
     WPEEventType type =
         pressed ? WPE_EVENT_POINTER_DOWN : WPE_EVENT_POINTER_UP;
-    guint press_count = wpe_view_compute_press_count(
-        page->view,
-        x,
-        y,
-        button,
-        time_ms);
     WPEEvent *event = wpe_event_pointer_button_new(
         type,
         page->view,
@@ -883,7 +1358,7 @@ void water_wpe_page_pointer_button(
         button,
         x,
         y,
-        press_count);
+        click_count);
     wpe_view_event(page->view, event);
     wpe_event_unref(event);
 }
@@ -957,11 +1432,11 @@ void water_wpe_page_key(
     wpe_event_unref(event);
 }
 
-void water_wpe_page_evaluate(WaterWpePage *page, const char *script)
+void water_wpe_page_paste(WaterWpePage *page)
 {
-    g_assert(page != NULL);
-    g_assert(script != NULL);
-    water_wpe_evaluate_without_result(page, script);
+    webkit_web_view_execute_editing_command(
+        page->web_view,
+        WEBKIT_EDITING_COMMAND_PASTE);
 }
 
 void water_wpe_page_add_script(
@@ -1021,10 +1496,14 @@ void water_wpe_page_set_cookie(WaterWpePage *page, const char *cookie)
 {
     const char *uri = webkit_web_view_get_uri(page->web_view);
     g_assert(uri != NULL);
-    SoupCookie *parsed = soup_cookie_parse(cookie, uri);
+    /* libsoup 3 takes the origin as a `GUri`, not a string. */
+    GUri *origin = g_uri_parse(uri, G_URI_FLAGS_NONE, NULL);
+    g_assert(origin != NULL);
+    SoupCookie *parsed = soup_cookie_parse(cookie, origin);
+    g_uri_unref(origin);
     g_assert(parsed != NULL);
-    WebKitCookieManager *manager = webkit_website_data_manager_get_cookie_manager(
-        webkit_web_view_get_website_data_manager(page->web_view));
+    WebKitCookieManager *manager = webkit_network_session_get_cookie_manager(
+        webkit_web_view_get_network_session(page->web_view));
     webkit_cookie_manager_add_cookie(
         manager,
         parsed,
@@ -1121,8 +1600,8 @@ void water_wpe_page_get_cookies(
 {
     const char *uri = webkit_web_view_get_uri(page->web_view);
     g_assert(uri != NULL);
-    WebKitCookieManager *manager = webkit_website_data_manager_get_cookie_manager(
-        webkit_web_view_get_website_data_manager(page->web_view));
+    WebKitCookieManager *manager = webkit_network_session_get_cookie_manager(
+        webkit_web_view_get_network_session(page->web_view));
     WaterWpeAsyncResult *async = g_new0(WaterWpeAsyncResult, 1);
     async->callback = callback;
     async->user_data = user_data;
@@ -1132,20 +1611,6 @@ void water_wpe_page_get_cookies(
         NULL,
         water_wpe_cookies_ready,
         async);
-}
-
-/* One text form for every JavaScript result, matching the GTK and CEF backends:
- * a string comes back bare, anything else as JSON. `jsc_value_to_json` quotes a
- * string, which is why WPE alone used to report `"WaterUI"` where the others
- * reported `WaterUI`. */
-static char *water_wpe_value_to_text(JSCValue *value)
-{
-    if (jsc_value_is_string(value))
-        return jsc_value_to_string(value);
-    if (jsc_value_is_null(value) || jsc_value_is_undefined(value))
-        return g_strdup("null");
-    char *json = jsc_value_to_json(value, 0);
-    return json ? json : jsc_value_to_string(value);
 }
 
 /* Reports one finished evaluation and consumes `async`, `value` and `error`.
@@ -1167,7 +1632,20 @@ static void water_wpe_javascript_complete(
         g_free(async);
         return;
     }
-    char *text = water_wpe_value_to_text(value);
+    /* Both paths evaluate scripts that encode their answer in the page -- the
+     * raw path through `raw_evaluation`, the awaited one through the shared
+     * wrapper's envelope -- so the value is a string, reported as it is.
+     * Anything else means the script broke that contract, and it is reported
+     * as a failure rather than re-encoded here. */
+    if (!jsc_value_is_string(value)) {
+        static const char message[] =
+            "the script evaluated to a value that is not the string it must answer";
+        async->callback(async->user_data, false, message, sizeof message - 1);
+        g_object_unref(value);
+        g_free(async);
+        return;
+    }
+    char *text = jsc_value_to_string(value);
     async->callback(async->user_data, true, text, strlen(text));
     g_free(text);
     g_object_unref(value);
@@ -1259,6 +1737,9 @@ void water_wpe_frame_presented(void *user_data)
         NULL);
 }
 
+/* Releasing hands the caller's reference to the queued release, which is the
+ * last one: `water_wpe_frame_released_on_main` drops it after telling the view
+ * the buffer is back. The caller must not touch the token afterwards. */
 void water_wpe_frame_release(void *user_data, int release_fence_fd)
 {
     WaterWpeFrameToken *token = user_data;
@@ -1271,5 +1752,4 @@ void water_wpe_frame_release(void *user_data, int release_fence_fd)
         water_wpe_frame_released_on_main,
         release,
         NULL);
-    water_wpe_frame_token_unref(token);
 }
