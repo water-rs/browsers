@@ -44,7 +44,7 @@ pub use gpu::{WpeGpuView, gpu_view_with_input};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use input::{WpeInputGpuView, WpeSurfaceInput};
 #[cfg(all(feature = "webview", target_os = "linux"))]
-pub use install::install;
+pub use install::{WpeWebView, install};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use lease::WpeFrameLease;
 #[cfg(all(feature = "webview", target_os = "linux"))]

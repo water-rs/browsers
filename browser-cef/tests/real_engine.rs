@@ -97,9 +97,11 @@ use tiny_http::{Header, Response, Server};
 #[cfg(target_os = "macos")]
 use waterui_browser_cef::initialize_macos_application;
 use waterui_browser_cef::{
-    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, install, run_packaged_subprocess,
+    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, CefWebView, install,
+    run_packaged_subprocess,
 };
-use waterui_core::{Environment, View as _, view::Hook};
+use waterui_core::Environment;
+use waterui_core::view::hook::Hook as _;
 use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
@@ -608,16 +610,16 @@ fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways(engine: &Engine
     );
 }
 
-/// The realization an application installs draws the pages this suite loads.
+/// The realization an application selects draws the pages this suite loads.
 ///
-/// `waterui_browser_cef::install` is the whole engine selection: it registers
-/// the `Hook<WebView>` that turns the semantic component into a GPU surface over
-/// a live Chromium page. The hook's one fragile joint is the documented
+/// `waterui_browser_cef::install` supplies the controller that opens CEF pages,
+/// and the `CefWebView` hook turns the semantic component into a GPU surface
+/// over a live Chromium page. The hook's one fragile joint is the documented
 /// downcast — it takes the handle the environment's `WebViewController` produced
 /// and asserts it is CEF's — and nothing but a real runtime proves that handle
-/// is the type the realization expects. `body` is evaluated here exactly as a
-/// renderer evaluates it, so a hook that failed to install, or installed against
-/// a handle it cannot read, fails here rather than at the first frame.
+/// is the type the realization expects. The hook is applied here exactly as a
+/// backend applies it, so a hook against a handle it cannot read fails here
+/// rather than at the first frame.
 fn the_installed_realization_draws_a_live_page(engine: &Engine) {
     let mut env = Environment::new();
     // The runtime this process already initialized: CEF initializes once per
@@ -625,10 +627,6 @@ fn the_installed_realization_draws_a_live_page(engine: &Engine) {
     env.insert(engine.runtime.clone());
     install(&mut env);
 
-    assert!(
-        env.get::<Hook<WebView>>().is_some(),
-        "install must register the WebView realization"
-    );
     assert!(
         env.get::<WebViewController>().is_some(),
         "install must supply the controller that opens CEF pages"
@@ -645,23 +643,10 @@ fn the_installed_realization_draws_a_live_page(engine: &Engine) {
         .expect("the installed controller");
     let webview = controller.open();
     webview.handle().go_to(&engine.url("/first"));
-    // What a renderer does with the component: evaluate its body under the
-    // application environment and get the realization back.
-    let _realization = webview.body(&env);
-
-    // Two engines cannot both draw one component, and a second explicit install
-    // is a configuration error rather than a silent winner. The expected panic
-    // is caught here, so its report would only look like a failure in the log.
-    let reporter = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = env.clone();
-        install(&mut env);
-    }));
-    std::panic::set_hook(reporter);
+    // What a backend does with the payload in the hook's scope.
     assert!(
-        second.is_err(),
-        "installing a second WebView realization must fail loudly"
+        CefWebView.apply(webview, &env).is_ok(),
+        "the CEF hook must claim a page CEF's controller opened"
     );
 }
 
