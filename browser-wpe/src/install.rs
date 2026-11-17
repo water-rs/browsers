@@ -25,7 +25,7 @@ use crate::{WpeController, WpeWebViewHandle, gpu_view_with_input};
 /// views that hold web views:
 ///
 /// ```ignore
-/// pub fn app(mut env: Environment) -> App {
+/// pub fn app(mut env: Environment) -> App<impl Windows> {
 ///     waterui_browser_wpe::install(&mut env);
 ///     App::new(|| root().hooks(waterui_browser_wpe::WpeWebView), env)
 /// }

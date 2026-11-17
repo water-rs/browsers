@@ -39,7 +39,7 @@ fn ensure_runtime(env: &mut Environment) -> CefRuntime {
 /// views that hold web views:
 ///
 /// ```ignore
-/// pub fn app(mut env: Environment) -> App {
+/// pub fn app(mut env: Environment) -> App<impl Windows> {
 ///     waterui_browser_cef::install(&mut env);
 ///     App::new(|| root().hooks(waterui_browser_cef::CefWebView), env)
 /// }
