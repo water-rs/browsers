@@ -1,54 +1,57 @@
-//! Where an application links WPE `WebKit` into its own environment.
+//! Where an application links WPE `WebKit` into its own views.
 //!
 //! Which browser engine draws a `WebView` is the application's choice, not the
-//! renderer's: an app that wants WPE depends on this crate and calls
-//! [`install`] from its composition root. The renderer stays engine-agnostic —
-//! it draws the `ExternalFrameView` this hook returns exactly like any other —
-//! and a
+//! renderer's: an app that wants WPE depends on this crate, prepares the
+//! controller with [`install`] in its composition root and scopes
+//! [`WpeWebView`] over its views. The renderer stays engine-agnostic — it draws
+//! the `ExternalFrameView` the hook returns exactly like any other — and a
 //! build that never asks for WPE links none of it.
 
 use waterui_core::accessibility::{AccessibilityRole, default_role};
-use waterui_core::{AnyView, Environment, Metadata, Retain, view::Hook};
+use waterui_core::view::hook::Hook;
+use waterui_core::{Environment, Metadata, Retain, View};
 use waterui_webview::{WebView, WebViewController};
 
 use crate::{WpeController, WpeWebViewHandle, gpu_view_with_input};
 
-/// Installs the WPE realization of the standard [`WebView`].
+/// Prepares the environment for WPE's [`WebView`] realization.
 ///
-/// Call this from the application's composition root, before the view tree is
-/// built:
+/// It supplies a [`WebViewController`] backed by the `water`-staged runtime, unless the
+/// application already installed one of its own. The runtime itself is not
+/// loaded until the first page opens. [`WpeWebView`] draws the pages that
+/// controller opens.
+///
+/// Call it from the application's composition root, and scope the hook over the
+/// views that hold web views:
 ///
 /// ```ignore
-/// pub fn app(mut env: Environment) -> App {
+/// pub fn app(mut env: Environment) -> App<impl Windows> {
 ///     waterui_browser_wpe::install(&mut env);
-///     App::new(root, env)
+///     App::new(|| root().hooks(waterui_browser_wpe::WpeWebView), env)
 /// }
 /// ```
-///
-/// It supplies a [`WebViewController`] backed by the `water`-staged runtime
-/// unless the application already installed one of its own — the runtime itself
-/// is not loaded until the first page opens — and registers the hook that draws
-/// every `WebView` into a GPU surface.
-///
-/// # Panics
-///
-/// Panics when a `WebView` realization is already installed. Two engines cannot
-/// both draw one component, and picking the winner silently is how an
-/// application ends up running an engine it did not choose: an explicit install
-/// colliding with another explicit install is a configuration error. A backend
-/// that bridges a platform web engine is not affected — it takes the component
-/// by type before the hook is ever consulted.
 pub fn install(env: &mut Environment) {
-    assert!(
-        env.get::<Hook<WebView>>().is_none(),
-        "a WebView realization is already installed; an application selects exactly one browser engine"
-    );
     // The controller is a default, not an override: an application or test that
     // opened its pages with a controller of its own keeps it.
     if env.get::<WebViewController>().is_none() {
         env.insert(WebViewController::new(WpeController::packaged()));
     }
-    env.insert_hook::<WebView, AnyView>(|env, webview| {
+}
+
+/// WPE's realization of the standard [`WebView`]: every page in its scope
+/// drawn into a GPU surface.
+///
+/// # Panics
+///
+/// Realizing a page another engine opened panics: the `WebViewController` in
+/// the environment is not WPE's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WpeWebView;
+
+impl Hook for WpeWebView {
+    type Target = WebView;
+
+    fn apply(&self, webview: WebView, env: &Environment) -> Result<impl View, WebView> {
         let page = webview
             .handle()
             .downcast_ref::<WpeWebViewHandle>()
@@ -68,9 +71,9 @@ pub fn install(env: &mut Environment) {
         // reactive state had gone dead.
         // The page is drawn into a texture the host tree cannot see into, so
         // the surface publishes the accessibility node itself.
-        AnyView::new(Metadata::new(
+        Ok(Metadata::new(
             default_role(env, surface, AccessibilityRole::Group),
             Retain::new(webview),
         ))
-    });
+    }
 }
