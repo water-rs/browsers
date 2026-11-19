@@ -5,9 +5,9 @@
 //! `libloading` keeps the framework mapped for as long as the `Library` lives.
 
 use async_channel::{Receiver, TryRecvError, unbounded};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
@@ -584,6 +584,10 @@ impl Drop for RuntimeInner {
     }
 }
 
+thread_local! {
+    static ACTIVE_RUNTIME: RefCell<Option<Weak<RuntimeInner>>> = const { RefCell::new(None) };
+}
+
 /// One process-owned CEF runtime shared by standard `WebView` and Chromium pages.
 #[derive(Clone)]
 pub struct CefRuntime {
@@ -597,6 +601,20 @@ impl core::fmt::Debug for CefRuntime {
 }
 
 impl CefRuntime {
+    /// Returns the process's packaged CEF runtime, initializing it on first call.
+    ///
+    /// Subsequent calls in the same process reuse the active runtime rather than
+    /// initializing CEF a second time.
+    #[must_use]
+    pub fn packaged() -> Self {
+        if let Some(inner) =
+            ACTIVE_RUNTIME.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))
+        {
+            return Self { inner };
+        }
+        Self::initialize(CefRuntimeConfiguration::packaged())
+    }
+
     /// Loads, validates, executes subprocess dispatch, and initializes CEF.
     ///
     /// CEF's OS sandbox remains enabled. A missing helper or malformed runtime
@@ -606,9 +624,16 @@ impl CefRuntime {
     /// # Panics
     ///
     /// Panics when configuration, runtime identity, sandbox initialization,
-    /// subprocess dispatch, or CEF initialization fails.
+    /// subprocess dispatch, or CEF initialization fails, or when a runtime is
+    /// already active in this process.
     #[must_use]
     pub fn initialize(configuration: CefRuntimeConfiguration) -> Self {
+        ACTIVE_RUNTIME.with(|slot| {
+            assert!(
+                slot.borrow().as_ref().and_then(Weak::upgrade).is_none(),
+                "CEF runtime is already initialized in this process; reuse CefRuntime::packaged()"
+            );
+        });
         let CefRuntimeConfiguration { paths, cache_root } = configuration;
         #[cfg(target_os = "macos")]
         crate::application_mac::assert_macos_application_active();
@@ -685,19 +710,21 @@ impl CefRuntime {
             paths.root().display()
         );
 
-        Self {
-            inner: Rc::new(RuntimeInner {
-                _app: app,
-                _library: library,
-                pump_requests,
-                next_pump: Cell::new(Instant::now()),
-                #[cfg(any(feature = "chromium", feature = "webview"))]
-                pump_running: Cell::new(false),
-                #[cfg(any(feature = "chromium", feature = "webview"))]
-                cache_root,
-                _sandbox: sandbox,
-            }),
-        }
+        let inner = Rc::new(RuntimeInner {
+            _app: app,
+            _library: library,
+            pump_requests,
+            next_pump: Cell::new(Instant::now()),
+            #[cfg(any(feature = "chromium", feature = "webview"))]
+            pump_running: Cell::new(false),
+            #[cfg(any(feature = "chromium", feature = "webview"))]
+            cache_root,
+            _sandbox: sandbox,
+        });
+        ACTIVE_RUNTIME.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::downgrade(&inner));
+        });
+        Self { inner }
     }
 
     /// Executes due CEF message-loop work and returns the next requested deadline.

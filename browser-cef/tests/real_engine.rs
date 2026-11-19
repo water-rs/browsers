@@ -97,11 +97,9 @@ use tiny_http::{Header, Response, Server};
 #[cfg(target_os = "macos")]
 use waterui_browser_cef::initialize_macos_application;
 use waterui_browser_cef::{
-    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, CefWebView, install,
-    run_packaged_subprocess,
+    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, run_packaged_subprocess, webview,
 };
 use waterui_core::Environment;
-use waterui_core::view::hook::Hook as _;
 use waterui_url::Url;
 use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
@@ -610,44 +608,27 @@ fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways(engine: &Engine
     );
 }
 
-/// The realization an application selects draws the pages this suite loads.
+/// The realization an engine exposes draws the pages this suite loads.
 ///
-/// `waterui_browser_cef::install` supplies the controller that opens CEF pages,
-/// and the `CefWebView` hook turns the semantic component into a GPU surface
-/// over a live Chromium page. The hook's one fragile joint is the documented
-/// downcast — it takes the handle the environment's `WebViewController` produced
-/// and asserts it is CEF's — and nothing but a real runtime proves that handle
-/// is the type the realization expects. The hook is applied here exactly as a
-/// backend applies it, so a hook against a handle it cannot read fails here
-/// rather than at the first frame.
-fn the_installed_realization_draws_a_live_page(engine: &Engine) {
-    let mut env = Environment::new();
-    // The runtime this process already initialized: CEF initializes once per
-    // process, so `install` must reuse the one in the environment.
-    env.insert(engine.runtime.clone());
-    install(&mut env);
+/// `CefRuntime::webview_controller` supplies the controller that opens CEF
+/// pages, and [`webview`] turns the semantic component into a GPU surface over
+/// a live Chromium page. Its one fragile joint is the documented downcast — it
+/// takes the handle CEF's `WebViewController` produced and asserts it is CEF's
+/// — and nothing but a real runtime proves that handle is the type the
+/// realization expects. The function is called here exactly as a backend calls
+/// it, so a mismatch fails here rather than at the first frame.
+fn the_realization_draws_a_live_page(engine: &Engine) {
+    let env = Environment::new();
 
-    assert!(
-        env.get::<WebViewController>().is_some(),
-        "install must supply the controller that opens CEF pages"
-    );
-
-    // A page from the environment's own controller, driven far enough to be a
+    // A page from the engine's own controller, driven far enough to be a
     // real browser rather than a handle that has not started.
     let page = engine.page();
     page.open_page("/first");
 
-    let controller = env
-        .get::<WebViewController>()
-        .cloned()
-        .expect("the installed controller");
-    let webview = controller.open();
-    webview.handle().go_to(&engine.url("/first"));
-    // What a backend does with the payload in the hook's scope.
-    assert!(
-        CefWebView.apply(webview, &env).is_ok(),
-        "the CEF hook must claim a page CEF's controller opened"
-    );
+    let view = engine.controller.open();
+    view.handle().go_to(&engine.url("/first"));
+    // What a backend builds in `NativeBackend::web_view`.
+    let _ = webview(view, &env);
 }
 
 /// The raw evaluation path answers with the JSON encoding of the value.
@@ -820,8 +801,8 @@ const CHECKS: [Check; 11] = [
         integers_beyond_two_to_the_fifty_third_cross_intact_both_ways,
     ),
     (
-        "the_installed_realization_draws_a_live_page",
-        the_installed_realization_draws_a_live_page,
+        "the_realization_draws_a_live_page",
+        the_realization_draws_a_live_page,
     ),
     (
         "the_asset_origin_serves_bundled_content",

@@ -23,8 +23,6 @@ mod gpu;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod input;
 #[cfg(all(feature = "webview", target_os = "linux"))]
-mod install;
-#[cfg(all(feature = "webview", target_os = "linux"))]
 mod lease;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 mod page;
@@ -44,8 +42,6 @@ pub use gpu::{WpeGpuView, gpu_view_with_input};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use input::{WpeInputGpuView, WpeSurfaceInput};
 #[cfg(all(feature = "webview", target_os = "linux"))]
-pub use install::{WpeWebView, install};
-#[cfg(all(feature = "webview", target_os = "linux"))]
 pub use lease::WpeFrameLease;
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use page::{PointerButton, WpePage};
@@ -54,4 +50,4 @@ pub use pump::{PumpDeadline, WpePollFd, WpeReadiness};
 #[cfg(all(feature = "webview", target_os = "linux"))]
 pub use runtime::{WPE_WEBKIT_VERSION, WpeRuntime, WpeRuntimePaths};
 #[cfg(all(feature = "webview", target_os = "linux"))]
-pub use webview::{WpeController, WpeWebViewHandle};
+pub use webview::{WpeController, WpeWebViewHandle, webview, webview_controller};

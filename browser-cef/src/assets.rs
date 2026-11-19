@@ -3,7 +3,7 @@
 //!
 //! The scheme is declared once for the process from
 //! [`crate::app::App`]'s `on_register_custom_schemes` — CEF cannot create
-//! views under an undeclared scheme. A [`crate::webview::CefWebViewController`]
+//! views under an undeclared scheme. A [`crate::CefController`]
 //! opened with an asset server registers an [`AssetSchemeHandlerFactory`] on
 //! its browser's request context — every page owns a private context, so the
 //! factory answers that page alone. Asset requests therefore never touch the
