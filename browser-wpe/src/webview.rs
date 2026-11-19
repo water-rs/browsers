@@ -144,11 +144,11 @@ pub fn webview(webview: WebView, env: &Environment) -> impl View {
     )
 }
 
-/// Creates a [`WebViewController`](waterui_webview::WebViewController)
-/// backed by the packaged WPE runtime, loaded on first use.
+/// Creates a [`WebViewController`] backed by the packaged WPE runtime, loaded
+/// on first use.
 #[must_use]
-pub fn webview_controller() -> waterui_webview::WebViewController {
-    waterui_webview::WebViewController::new(WpeController::packaged())
+pub fn webview_controller() -> WebViewController {
+    WebViewController::new(WpeController::packaged())
 }
 
 /// Adapts the shared bridge's one-function transport onto WPE's message handler.
