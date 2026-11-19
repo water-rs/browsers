@@ -1555,6 +1555,15 @@ impl ChromiumPageHandle for CefPageHandle {
         let future = self.close_page();
         async move { future.await.map_err(Into::into) }
     }
+
+    fn gpu_view(&self) -> waterui_graphics::gpu::ExternalFrameView {
+        assert_eq!(
+            Self::mode(self),
+            CefPageMode::Visible,
+            "a headless Chromium page cannot be rendered as a ChromiumView"
+        );
+        crate::gpu_view_with_input(self.clone())
+    }
 }
 
 #[cfg(feature = "chromium")]
@@ -1572,15 +1581,50 @@ const fn screenshot_command(format: ScreenshotFormat) -> crate::cdp::protocol::C
     }
 }
 
+enum RuntimeSource {
+    Ready(CefRuntime),
+    Packaged(RefCell<Option<CefRuntime>>),
+}
+
 /// Controller shared by standard `WebView` and full Chromium components.
 #[derive(Clone)]
 pub struct CefController {
-    runtime: CefRuntime,
+    source: Rc<RuntimeSource>,
+}
+
+impl core::fmt::Debug for CefController {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CefController")
+            .finish_non_exhaustive()
+    }
 }
 
 impl CefController {
-    pub const fn new(runtime: CefRuntime) -> Self {
-        Self { runtime }
+    /// Creates a controller backed by an initialized runtime.
+    #[must_use]
+    pub fn new(runtime: CefRuntime) -> Self {
+        Self {
+            source: Rc::new(RuntimeSource::Ready(runtime)),
+        }
+    }
+
+    /// Creates a controller backed by the packaged runtime, initialized on first use.
+    #[must_use]
+    pub fn packaged() -> Self {
+        Self {
+            source: Rc::new(RuntimeSource::Packaged(RefCell::new(None))),
+        }
+    }
+
+    fn runtime(&self) -> CefRuntime {
+        match self.source.as_ref() {
+            RuntimeSource::Ready(runtime) => runtime.clone(),
+            RuntimeSource::Packaged(slot) => slot
+                .borrow_mut()
+                .get_or_insert_with(CefRuntime::packaged)
+                .clone(),
+        }
     }
 
     pub(crate) fn open_page(
@@ -1588,7 +1632,7 @@ impl CefController {
         configuration: CefPageConfiguration,
         mode: CefPageMode,
     ) -> CefPageHandle {
-        CefPageHandle::create(&self.runtime, configuration, mode)
+        CefPageHandle::create(&self.runtime(), configuration, mode)
     }
 }
 

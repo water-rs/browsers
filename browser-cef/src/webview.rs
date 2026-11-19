@@ -6,11 +6,12 @@ use cef::{ImplBrowser, ImplBrowserHost, ImplFrame};
 use cookie::{Expiration, SameSite};
 use serde_json::Value;
 use suiteki::Str;
-use waterui_core::{Computed, Signal};
+use waterui_core::accessibility::{AccessibilityRole, default_role};
+use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{
     ASSET_ORIGIN, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime, WatcherGuard,
-    WebViewConfig, WebViewHandle, WebViewOpenError, bridge,
+    WebView, WebViewConfig, WebViewController, WebViewHandle, WebViewOpenError, bridge,
 };
 
 use crate::cdp::{CefCdpError, CefCdpSession, protocol};
@@ -396,6 +397,45 @@ impl CustomWebViewController for CefController {
     fn asset_origin(&self) -> Option<Url> {
         Some(Url::new(ASSET_ORIGIN))
     }
+}
+
+/// Builds the GPU surface view presenting a CEF [`WebView`], with surface
+/// input routing, its accessibility role, and the retained component keeping
+/// reactive state alive.
+///
+/// # Panics
+///
+/// Panics when `webview` was opened by another engine's `WebViewController`.
+pub fn webview(webview: WebView, env: &Environment) -> impl View {
+    let page = webview
+        .handle()
+        .downcast_ref::<CefWebViewHandle>()
+        .expect(
+            "the CEF WebView realization was handed a page from another engine; \
+             the WebViewController in this environment is not CEF's",
+        )
+        .page()
+        .clone();
+    // The CEF view takes its own input: it reports `wants_input_events`, so a
+    // renderer routes what lands on this layer straight into this crate's
+    // adapter and owns no Chromium semantics.
+    let surface = crate::gpu_view_with_input(page);
+    // The semantic `WebView` owns the subscriptions that drive `can_go_back` /
+    // `can_go_forward`, the event signal, and the URL and user-agent bindings.
+    // Dropping it here would leave a live page whose reactive state had gone
+    // dead. The page is drawn into a texture the host tree cannot see into, so
+    // the view publishes the accessibility node itself.
+    Metadata::new(
+        default_role(env, surface, AccessibilityRole::Group),
+        Retain::new(webview),
+    )
+}
+
+/// Creates a [`WebViewController`] backed by the packaged CEF runtime,
+/// initialized on first use.
+#[must_use]
+pub fn webview_controller() -> WebViewController {
+    WebViewController::new(CefController::packaged())
 }
 
 /// What the host keeps about one live execution context.

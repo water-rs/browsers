@@ -4,14 +4,15 @@ use std::rc::Rc;
 use cookie::{Cookie, SameSite};
 use nami::watcher::BoxWatcherGuard;
 use serde::Deserialize;
-use waterui_core::{Computed, Signal};
+use waterui_core::accessibility::{AccessibilityRole, default_role};
+use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{
-    ASSET_ORIGIN, CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebViewConfig,
-    WebViewHandle, WebViewOpenError,
+    ASSET_ORIGIN, CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebView,
+    WebViewConfig, WebViewController, WebViewHandle, WebViewOpenError,
 };
 
-use crate::{WpePage, WpeRuntime, WpeRuntimePaths};
+use crate::{WpePage, WpeRuntime, WpeRuntimePaths, gpu_view_with_input};
 
 /// Where a controller's runtime comes from.
 ///
@@ -109,6 +110,45 @@ impl CustomWebViewController for WpeController {
     fn asset_origin(&self) -> Option<Url> {
         Some(Url::new(ASSET_ORIGIN))
     }
+}
+
+/// Builds the GPU surface view presenting a WPE [`WebView`], with surface
+/// input routing, its accessibility role, and the retained component keeping
+/// reactive state alive.
+///
+/// # Panics
+///
+/// Panics when `webview` was opened by another engine's `WebViewController`.
+pub fn webview(webview: WebView, env: &Environment) -> impl View {
+    let page = webview
+        .handle()
+        .downcast_ref::<WpeWebViewHandle>()
+        .expect(
+            "the WPE WebView realization was handed a page from another engine; \
+             the WebViewController in this environment is not WPE's",
+        )
+        .page()
+        .clone();
+    // The WPE view takes its own input: it reports `wants_input_events`, so a
+    // renderer routes what lands on this layer straight into this crate's
+    // adapter and owns no `WPEPlatform` semantics.
+    let surface = gpu_view_with_input(page);
+    // The semantic `WebView` owns the subscriptions that drive `can_go_back` /
+    // `can_go_forward`, the event signal, and the URL and user-agent bindings.
+    // Dropping it here would leave a live page whose reactive state had gone
+    // dead. The page is drawn into a texture the host tree cannot see into, so
+    // the surface publishes the accessibility node itself.
+    Metadata::new(
+        default_role(env, surface, AccessibilityRole::Group),
+        Retain::new(webview),
+    )
+}
+
+/// Creates a [`WebViewController`](waterui_webview::WebViewController)
+/// backed by the packaged WPE runtime, loaded on first use.
+#[must_use]
+pub fn webview_controller() -> waterui_webview::WebViewController {
+    waterui_webview::WebViewController::new(WpeController::packaged())
 }
 
 /// Adapts the shared bridge's one-function transport onto WPE's message handler.

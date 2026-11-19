@@ -17,8 +17,6 @@ mod gpu;
 #[cfg(any(feature = "chromium", feature = "webview"))]
 mod input;
 #[cfg(any(feature = "chromium", feature = "webview"))]
-mod install;
-#[cfg(any(feature = "chromium", feature = "webview"))]
 mod page;
 #[cfg(feature = "webview")]
 mod renderer;
@@ -37,14 +35,10 @@ pub use cdp::CefCdpSession;
 pub use gpu::{gpu_view, gpu_view_with_input};
 #[cfg(any(feature = "chromium", feature = "webview"))]
 pub use input::CefSurfaceInput;
-#[cfg(feature = "chromium")]
-pub use install::{CefChromium, install_chromium};
-#[cfg(feature = "webview")]
-pub use install::{CefWebView, install};
 #[cfg(any(feature = "chromium", feature = "webview"))]
 pub use page::{
-    AcceleratedFrameSink, CefInputModifiers, CefKeyInput, CefPageHandle, CefPointerButton,
-    CefPopupRect, CefTextRange,
+    AcceleratedFrameSink, CefController, CefInputModifiers, CefKeyInput, CefPageHandle,
+    CefPointerButton, CefPopupRect, CefTextRange,
 };
 #[cfg(target_os = "macos")]
 pub use runtime::initialize_sandbox_early;
@@ -54,7 +48,7 @@ pub use runtime::{
     CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, PumpDeadline, run_packaged_subprocess,
 };
 #[cfg(feature = "webview")]
-pub use webview::CefWebViewHandle;
+pub use webview::{CefWebViewHandle, webview, webview_controller};
 
 /// Exports the `RunWinMain` and `RunConsoleMain` entry points a Windows CEF
 /// application DLL must provide for the bootstrap launcher.
