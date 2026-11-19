@@ -1,7 +1,10 @@
+#[cfg(feature = "cef-runtime")]
 use std::os::raw::c_int;
 
+#[cfg(feature = "cef-runtime")]
 use objc2::MainThreadMarker;
 
+#[cfg(feature = "cef-runtime")]
 unsafe extern "C" {
     fn waterui_cef_initialize_macos_application() -> c_int;
     fn waterui_cef_macos_application_is_active() -> c_int;
@@ -14,27 +17,38 @@ unsafe extern "C" {
 ///
 /// # Panics
 ///
-/// Panics when called off the main thread or after another `NSApplication`
-/// class has already created the process application object.
+/// Panics when called off the main thread, after another `NSApplication`
+/// class has already created the process application object, or when built
+/// without the `cef-runtime` feature.
 pub fn initialize_macos_application() {
-    assert!(
-        MainThreadMarker::new().is_some(),
-        "the CEF macOS application must be initialized on the main thread"
-    );
-    assert_ne!(
-        // SAFETY: a C entry point in this crate's own helper library taking no
-        // arguments and returning a status code.
-        unsafe { waterui_cef_initialize_macos_application() },
-        0,
-        "CEF must install its NSApplication subclass before another framework creates NSApplication"
+    #[cfg(feature = "cef-runtime")]
+    {
+        assert!(
+            MainThreadMarker::new().is_some(),
+            "the CEF macOS application must be initialized on the main thread"
+        );
+        assert_ne!(
+            // SAFETY: a C entry point in this crate's own helper library taking no
+            // arguments and returning a status code.
+            unsafe { waterui_cef_initialize_macos_application() },
+            0,
+            "CEF must install its NSApplication subclass before another framework creates NSApplication"
+        );
+    }
+    #[cfg(not(feature = "cef-runtime"))]
+    panic!(
+        "waterui-browser-cef: macOS CEF application initialization requires the `cef-runtime` feature"
     );
 }
 
 pub fn assert_macos_application_active() {
+    #[cfg(feature = "cef-runtime")]
     assert_ne!(
         // SAFETY: as above — no arguments, status code out.
         unsafe { waterui_cef_macos_application_is_active() },
         0,
         "CEF requires a CefAppProtocol NSApplication subclass before runtime initialization"
     );
+    #[cfg(not(feature = "cef-runtime"))]
+    panic!("waterui-browser-cef: macOS CEF runtime requires the `cef-runtime` feature");
 }
