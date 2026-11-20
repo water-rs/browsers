@@ -4,7 +4,7 @@ use std::rc::Rc;
 use cookie::{Cookie, SameSite};
 use nami::watcher::BoxWatcherGuard;
 use serde::Deserialize;
-use waterui_core::accessibility::{AccessibilityRole, default_role};
+use waterui_accessibility::{AccessibilityRole, default_role};
 use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{

@@ -6,7 +6,7 @@ use cef::{ImplBrowser, ImplBrowserHost, ImplFrame};
 use cookie::{Expiration, SameSite};
 use serde_json::Value;
 use suiteki::Str;
-use waterui_core::accessibility::{AccessibilityRole, default_role};
+use waterui_accessibility::{AccessibilityRole, default_role};
 use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{
