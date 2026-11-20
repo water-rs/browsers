@@ -97,7 +97,8 @@ use tiny_http::{Header, Response, Server};
 #[cfg(target_os = "macos")]
 use waterui_browser_cef::initialize_macos_application;
 use waterui_browser_cef::{
-    CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, run_packaged_subprocess, webview,
+    CefController, CefRuntime, CefRuntimeConfiguration, CefRuntimePaths, run_packaged_subprocess,
+    webview,
 };
 use waterui_core::Environment;
 use waterui_url::Url;
@@ -105,7 +106,7 @@ use waterui_webview::conformance::raw_evaluation_answers_json;
 use waterui_webview::{
     BackendEvent, BridgeOrigins, IntoJsReply, JsReply, Json, NavigationDecision, NavigationPolicy,
     OriginPolicy, ScriptInjectionTime, ScriptMessageHandler, StateDeclarations, UserScript,
-    WatcherGuard, WebView, WebViewConfig, WebViewController, WebViewEvent, stay_on_origin,
+    WatcherGuard, WebView, WebViewConfig, WebViewEvent, open_webview_with, stay_on_origin,
 };
 
 /// How long one wait may take before the check gives up.
@@ -168,7 +169,7 @@ fn handler(
 struct Engine {
     server: Server,
     base: String,
-    controller: WebViewController,
+    controller: CefController,
     executor: TestExecutor,
     runtime: CefRuntime,
 }
@@ -307,7 +308,7 @@ impl<'a> Page<'a> {
             )],
             StateDeclarations::default(),
         );
-        let webview = engine.controller.open_with(config);
+        let webview = open_webview_with(&engine.controller, config);
         let handle = webview.handle();
 
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -611,12 +612,9 @@ fn integers_beyond_two_to_the_fifty_third_cross_intact_both_ways(engine: &Engine
 /// The realization an engine exposes draws the pages this suite loads.
 ///
 /// `CefRuntime::webview_controller` supplies the controller that opens CEF
-/// pages, and [`webview`] turns the semantic component into a GPU surface over
-/// a live Chromium page. Its one fragile joint is the documented downcast — it
-/// takes the handle CEF's `WebViewController` produced and asserts it is CEF's
-/// — and nothing but a real runtime proves that handle is the type the
-/// realization expects. The function is called here exactly as a backend calls
-/// it, so a mismatch fails here rather than at the first frame.
+/// pages, and [`webview`] turns the opened component into a GPU surface over
+/// a live Chromium page using the typed [`CefWebViewHandle`]. The function is
+/// called here as a backend calls it.
 fn the_realization_draws_a_live_page(engine: &Engine) {
     let env = Environment::new();
 
@@ -625,10 +623,11 @@ fn the_realization_draws_a_live_page(engine: &Engine) {
     let page = engine.page();
     page.open_page("/first");
 
-    let view = engine.controller.open();
-    view.handle().go_to(&engine.url("/first"));
+    let opened = WebView::open(engine.url("/first"))
+        .open_with(&engine.controller, &env)
+        .expect("CEF controller opens a real page");
     // What a backend builds in `NativeBackend::web_view`.
-    let _ = webview(view, &env);
+    let _ = webview(opened, &env);
 }
 
 /// The raw evaluation path answers with the JSON encoding of the value.
