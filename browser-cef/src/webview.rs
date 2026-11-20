@@ -10,8 +10,8 @@ use waterui_core::accessibility::{AccessibilityRole, default_role};
 use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{
-    ASSET_ORIGIN, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime, WatcherGuard,
-    WebView, WebViewConfig, WebViewController, WebViewHandle, WebViewOpenError, bridge,
+    ASSET_ORIGIN, Cookie, OpenedWebView, OriginPolicy, ScriptInjectionTime, WatcherGuard,
+    WebViewConfig, WebViewController, WebViewHandle, WebViewOpenError, bridge,
 };
 
 use crate::cdp::{CefCdpError, CefCdpSession, protocol};
@@ -376,8 +376,10 @@ impl CefWebViewHandle {
     }
 }
 
-impl CustomWebViewController for CefController {
-    fn open(&self, config: WebViewConfig) -> Result<impl WebViewHandle, WebViewOpenError> {
+impl WebViewController for CefController {
+    type Handle = CefWebViewHandle;
+
+    fn open(&self, config: WebViewConfig) -> Result<Self::Handle, WebViewOpenError> {
         let page = self.open_page(
             CefPageConfiguration {
                 renderer: Some(RendererBundle::new(&config)),
@@ -402,20 +404,8 @@ impl CustomWebViewController for CefController {
 /// Builds the GPU surface view presenting a CEF [`WebView`], with surface
 /// input routing, its accessibility role, and the retained component keeping
 /// reactive state alive.
-///
-/// # Panics
-///
-/// Panics when `webview` was opened by another engine's `WebViewController`.
-pub fn webview(webview: WebView, env: &Environment) -> impl View {
-    let page = webview
-        .handle()
-        .downcast_ref::<CefWebViewHandle>()
-        .expect(
-            "the CEF WebView realization was handed a page from another engine; \
-             the WebViewController in this environment is not CEF's",
-        )
-        .page()
-        .clone();
+pub fn webview(opened: OpenedWebView<CefWebViewHandle>, env: &Environment) -> impl View {
+    let page = opened.handle().page().clone();
     // The CEF view takes its own input: it reports `wants_input_events`, so a
     // renderer routes what lands on this layer straight into this crate's
     // adapter and owns no Chromium semantics.
@@ -427,15 +417,15 @@ pub fn webview(webview: WebView, env: &Environment) -> impl View {
     // the view publishes the accessibility node itself.
     Metadata::new(
         default_role(env, surface, AccessibilityRole::Group),
-        Retain::new(webview),
+        Retain::new(opened.into_webview()),
     )
 }
 
-/// Creates a [`WebViewController`] backed by the packaged CEF runtime,
-/// initialized on first use.
+/// Creates a [`CefController`] backed by the packaged CEF runtime, initialized
+/// on first use.
 #[must_use]
-pub fn webview_controller() -> WebViewController {
-    WebViewController::new(CefController::packaged())
+pub fn webview_controller() -> CefController {
+    CefController::packaged()
 }
 
 /// What the host keeps about one live execution context.
