@@ -306,9 +306,7 @@ mod linux {
         tracing::info!("RUN mirrored-state admission conformance");
         page.block_on(
             async move {
-                let controller = waterui_webview::WebViewController::new(
-                    waterui_browser_wpe::WpeController::new(runtime.clone()),
-                );
+                let controller = waterui_browser_wpe::WpeController::new(runtime.clone());
                 waterui_webview::conformance::mirrored_state_reaches_only_admitted_documents(
                     &controller,
                 )
@@ -321,10 +319,8 @@ mod linux {
         tracing::info!("RUN raw evaluation conformance");
         page.block_on(
             async move {
-                let controller = waterui_webview::WebViewController::new(
-                    waterui_browser_wpe::WpeController::new(raw_runtime),
-                );
-                let webview = controller.open();
+                let controller = waterui_browser_wpe::WpeController::new(raw_runtime);
+                let webview = waterui_webview::open_webview(&controller);
                 let handle = webview.handle().clone();
                 waterui_webview::conformance::raw_evaluation_answers_json(async |script| {
                     handle.run_javascript(script).await

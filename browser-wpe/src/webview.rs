@@ -8,8 +8,8 @@ use waterui_core::accessibility::{AccessibilityRole, default_role};
 use waterui_core::{Computed, Environment, Metadata, Retain, Signal, View};
 use waterui_url::Url;
 use waterui_webview::{
-    ASSET_ORIGIN, CustomWebViewController, ScriptInjectionTime, WatcherGuard, WebView,
-    WebViewConfig, WebViewController, WebViewHandle, WebViewOpenError,
+    ASSET_ORIGIN, OpenedWebView, ScriptInjectionTime, WatcherGuard, WebViewConfig,
+    WebViewController, WebViewHandle, WebViewOpenError,
 };
 
 use crate::{WpePage, WpeRuntime, WpeRuntimePaths, gpu_view_with_input};
@@ -102,8 +102,10 @@ impl WpeController {
     }
 }
 
-impl CustomWebViewController for WpeController {
-    fn open(&self, config: WebViewConfig) -> Result<impl WebViewHandle, WebViewOpenError> {
+impl WebViewController for WpeController {
+    type Handle = WpeWebViewHandle;
+
+    fn open(&self, config: WebViewConfig) -> Result<Self::Handle, WebViewOpenError> {
         Ok(WpeWebViewHandle::new(WpePage::new(self.runtime()), &config))
     }
 
@@ -115,20 +117,8 @@ impl CustomWebViewController for WpeController {
 /// Builds the GPU surface view presenting a WPE [`WebView`], with surface
 /// input routing, its accessibility role, and the retained component keeping
 /// reactive state alive.
-///
-/// # Panics
-///
-/// Panics when `webview` was opened by another engine's `WebViewController`.
-pub fn webview(webview: WebView, env: &Environment) -> impl View {
-    let page = webview
-        .handle()
-        .downcast_ref::<WpeWebViewHandle>()
-        .expect(
-            "the WPE WebView realization was handed a page from another engine; \
-             the WebViewController in this environment is not WPE's",
-        )
-        .page()
-        .clone();
+pub fn webview(opened: OpenedWebView<WpeWebViewHandle>, env: &Environment) -> impl View {
+    let page = opened.handle().page().clone();
     // The WPE view takes its own input: it reports `wants_input_events`, so a
     // renderer routes what lands on this layer straight into this crate's
     // adapter and owns no `WPEPlatform` semantics.
@@ -140,15 +130,15 @@ pub fn webview(webview: WebView, env: &Environment) -> impl View {
     // the surface publishes the accessibility node itself.
     Metadata::new(
         default_role(env, surface, AccessibilityRole::Group),
-        Retain::new(webview),
+        Retain::new(opened.into_webview()),
     )
 }
 
-/// Creates a [`WebViewController`] backed by the packaged WPE runtime, loaded
-/// on first use.
+/// Creates a [`WpeController`] backed by the packaged WPE runtime, loaded on
+/// first use.
 #[must_use]
-pub fn webview_controller() -> WebViewController {
-    WebViewController::new(WpeController::packaged())
+pub fn webview_controller() -> WpeController {
+    WpeController::packaged()
 }
 
 /// Adapts the shared bridge's one-function transport onto WPE's message handler.

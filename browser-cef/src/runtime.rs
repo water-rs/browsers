@@ -17,8 +17,6 @@ use cef::{Settings, api_hash, execute_process, initialize, shutdown, sys};
 use serde::Deserialize;
 #[cfg(feature = "chromium")]
 use waterui_chromium::ChromiumController;
-#[cfg(feature = "webview")]
-use waterui_webview::WebViewController;
 
 use crate::app::new_app;
 #[cfg(any(feature = "chromium", feature = "webview"))]
@@ -819,8 +817,8 @@ impl CefRuntime {
     /// Creates the standard `WebView` controller backed by this runtime.
     #[cfg(feature = "webview")]
     #[must_use]
-    pub fn webview_controller(&self) -> WebViewController {
-        WebViewController::new(CefController::new(self.clone()))
+    pub fn webview_controller(&self) -> CefController {
+        CefController::new(self.clone())
     }
 
     /// Creates the full Chromium controller backed by this runtime.
