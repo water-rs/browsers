@@ -56,7 +56,7 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 serde_json = "1.0"
 thiserror = "2.0.19"
 tracing = "0.1.44"
-waterui-accessibility = { version = "0.5.1", git = "https://github.com/water-rs/waterui", branch = "refactor/4770-slim-core-ui" }
+waterui-accessibility = { version = "0.5.1", git = "https://github.com/water-rs/waterui", branch = "main" }
 waterui-chromium = { version = "0.5.1", optional = true }
 waterui-core = { version = "0.5.1" }
 waterui-graphics = { version = "0.5.1", features = ["gpu"] }

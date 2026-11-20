@@ -454,7 +454,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wasm-bindgen-futures",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
  "web-time",
 ]
 
@@ -505,7 +505,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wasm-bindgen",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
  "web-sys",
  "wgpu",
 ]
@@ -522,8 +522,8 @@ dependencies = [
  "rustc-hash 2.1.3",
  "serde",
  "thiserror 2.0.21",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
- "waterui-easing 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
+ "waterui-easing",
  "web-time",
 ]
 
@@ -551,7 +551,7 @@ source = "git+https://github.com/water-rs/waterui?branch=main#7c2e71f4b451f72dd9
 dependencies = [
  "kurbo",
  "num-bigint",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
 ]
 
 [[package]]
@@ -1017,7 +1017,7 @@ dependencies = [
  "pollster",
  "thiserror 2.0.21",
  "tracing",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
  "web-time",
  "wgpu",
 ]
@@ -3766,17 +3766,7 @@ source = "git+https://github.com/water-rs/waterui?branch=main#7c2e71f4b451f72dd9
 dependencies = [
  "nami",
  "suiteki",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
-]
-
-[[package]]
-name = "waterui-accessibility"
-version = "0.5.1"
-source = "git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui#f5918f6fca93a0e87e4d162a95675f62e1d123db"
-dependencies = [
- "nami",
- "suiteki",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
+ "waterui-core",
 ]
 
 [[package]]
@@ -3820,9 +3810,9 @@ dependencies = [
  "tiny_http",
  "tracing",
  "tracing-subscriber",
- "waterui-accessibility 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
+ "waterui-accessibility",
  "waterui-chromium",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-core",
  "waterui-graphics",
  "waterui-url",
  "waterui-watcher-set",
@@ -3853,8 +3843,8 @@ dependencies = [
  "tiny_http",
  "tracing",
  "tracing-subscriber",
- "waterui-accessibility 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-accessibility",
+ "waterui-core",
  "waterui-graphics",
  "waterui-url",
  "waterui-watcher-set",
@@ -3879,11 +3869,11 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
- "waterui-accessibility 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-accessibility",
+ "waterui-core",
  "waterui-graphics",
  "waterui-layout",
- "waterui-macros 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-macros",
  "waterui-url",
  "waterui-webview",
 ]
@@ -3898,21 +3888,13 @@ dependencies = [
  "filtrate-core",
  "nami",
  "pastey",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-core",
 ]
 
 [[package]]
 name = "waterui-contract"
 version = "0.5.1"
 source = "git+https://github.com/water-rs/waterui?branch=main#7c2e71f4b451f72dd96c821bfd3bcec5aec3b46e"
-dependencies = [
- "tracing",
-]
-
-[[package]]
-name = "waterui-contract"
-version = "0.5.1"
-source = "git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui#f5918f6fca93a0e87e4d162a95675f62e1d123db"
 dependencies = [
  "tracing",
 ]
@@ -3928,36 +3910,15 @@ dependencies = [
  "smallvec",
  "suiteki",
  "thiserror 2.0.21",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
- "waterui-easing 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
- "waterui-macros 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
-]
-
-[[package]]
-name = "waterui-core"
-version = "0.5.1"
-source = "git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui#f5918f6fca93a0e87e4d162a95675f62e1d123db"
-dependencies = [
- "anyhow",
- "nami",
- "num-traits",
- "smallvec",
- "suiteki",
- "thiserror 2.0.21",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
- "waterui-easing 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
- "waterui-macros 0.5.1 (git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui)",
+ "waterui-contract",
+ "waterui-easing",
+ "waterui-macros",
 ]
 
 [[package]]
 name = "waterui-easing"
 version = "0.5.1"
 source = "git+https://github.com/water-rs/waterui?branch=main#7c2e71f4b451f72dd96c821bfd3bcec5aec3b46e"
-
-[[package]]
-name = "waterui-easing"
-version = "0.5.1"
-source = "git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui#f5918f6fca93a0e87e4d162a95675f62e1d123db"
 
 [[package]]
 name = "waterui-graphics"
@@ -3982,7 +3943,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "waterui-color",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-core",
  "wgpu",
  "wgpu-external-frame 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -3995,28 +3956,14 @@ dependencies = [
  "nami",
  "num-traits",
  "smallvec",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
+ "waterui-core",
 ]
 
 [[package]]
 name = "waterui-macros"
 version = "0.5.1"
 source = "git+https://github.com/water-rs/waterui?branch=main#7c2e71f4b451f72dd96c821bfd3bcec5aec3b46e"
-dependencies = [
- "icu_locale_core",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 3.0.9",
- "toml",
- "unicode-ident",
-]
-
-[[package]]
-name = "waterui-macros"
-version = "0.5.1"
-source = "git+https://github.com/water-rs/waterui?branch=refactor%2F4770-slim-core-ui#f5918f6fca93a0e87e4d162a95675f62e1d123db"
 dependencies = [
  "icu_locale_core",
  "proc-macro-crate",
@@ -4035,7 +3982,7 @@ dependencies = [
  "base64 0.23.1",
  "nami-core",
  "suiteki",
- "waterui-contract 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-contract",
 ]
 
 [[package]]
@@ -4061,7 +4008,7 @@ dependencies = [
  "tracing",
  "waterkit-deeplink",
  "waterui-apple-os",
- "waterui-core 0.5.1 (git+https://github.com/water-rs/waterui?branch=main)",
+ "waterui-core",
  "waterui-layout",
  "waterui-url",
  "waterui-watcher-set",
